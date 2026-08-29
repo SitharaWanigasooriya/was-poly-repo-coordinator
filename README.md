@@ -1,12 +1,12 @@
 # poly — WAS Poly-Repo Coordination Tool
 
-[![CI](https://github.com/wanigasooriya/was-poly-repo-coordinator/actions/workflows/ci.yml/badge.svg)](https://github.com/wanigasooriya/was-poly-repo-coordinator/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/@wanigasooriya/poly)](https://www.npmjs.com/package/@wanigasooriya/poly)
+[![CI](https://github.com/wanigasooriya-solutions/was-poly-repo-coordinator/actions/workflows/ci.yml/badge.svg)](https://github.com/wanigasooriya-solutions/was-poly-repo-coordinator/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/@wanigasooriya-solutions/poly)](https://www.npmjs.com/package/@wanigasooriya-solutions/poly)
 
 Safe coordination of change sets across a Git superproject and its submodules.
 
 ```sh
-pnpm add -g @wanigasooriya/poly
+pnpm add -g @wanigasooriya-solutions/poly
 ```
 
 Implements **Phase 1 (Visibility)** of the [Solution Definition](docs/solution.docx),
@@ -45,7 +45,7 @@ Nothing in this tool ever deletes a snapshot.
 ## Install
 
 ```sh
-pnpm add -g @wanigasooriya/poly
+pnpm add -g @wanigasooriya-solutions/poly
 poly help
 ```
 
@@ -53,12 +53,12 @@ poly help
 <summary>npm / yarn / one-off</summary>
 
 ```sh
-npm  install -g @wanigasooriya/poly
-yarn global add @wanigasooriya/poly
+npm  install -g @wanigasooriya-solutions/poly
+yarn global add @wanigasooriya-solutions/poly
 
 # or run it without installing
-pnpm dlx @wanigasooriya/poly status
-npx @wanigasooriya/poly status
+pnpm dlx @wanigasooriya-solutions/poly status
+npx @wanigasooriya-solutions/poly status
 ```
 </details>
 
@@ -216,7 +216,7 @@ existing version, then publishes.
 ### One-time setup
 
 1. **Create the npm scope.** Sign in to npmjs.com and create an org named
-   `wanigasooriya` (free for public packages), or use your own username as the
+   `wanigasooriya-solutions` (free for public packages), or use your own username as the
    scope. The scope must exist before the first publish.
 
 2. **Publish v0.1.0 once, by hand.** npm can only attach a trusted publisher to a
@@ -237,7 +237,7 @@ existing version, then publishes.
    | Field | Value |
    |---|---|
    | Provider | GitHub Actions |
-   | Organization / user | `wanigasooriya` |
+   | Organization / user | `wanigasooriya-solutions` |
    | Repository | `was-poly-repo-coordinator` |
    | Workflow filename | `publish.yml` |
    | Environment | `npm-publish` |

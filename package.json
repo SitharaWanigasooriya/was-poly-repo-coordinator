@@ -1,5 +1,5 @@
 {
-  "name": "@wanigasooriya/poly",
+  "name": "@wanigasooriya-solutions/poly",
   "version": "0.1.0",
   "description": "Safe coordination of change sets across a Git superproject and its submodules. Your local work is never destroyed.",
   "bin": {
@@ -34,12 +34,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/wanigasooriya/was-poly-repo-coordinator.git"
+    "url": "git+https://github.com/SitharaWanigasooriya/was-poly-repo-coordinator.git"
   },
   "bugs": {
-    "url": "https://github.com/wanigasooriya/was-poly-repo-coordinator/issues"
+    "url": "https://github.com/SitharaWanigasooriya/was-poly-repo-coordinator/issues"
   },
-  "homepage": "https://github.com/wanigasooriya/was-poly-repo-coordinator#readme",
+  "homepage": "https://github.com/SitharaWanigasooriya/was-poly-repo-coordinator#readme",
   "author": "Sithara Wanigasooriya",
   "license": "MIT",
   "publishConfig": {
