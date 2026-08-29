@@ -1,0 +1,100 @@
+name: Publish
+
+# Publishing is triggered by creating a GitHub Release. That keeps the release
+# notes, the git tag and the npm version as one deliberate act rather than a
+# side effect of pushing.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'Pack and validate without publishing'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  # Required for npm Trusted Publishing (OIDC) and for provenance attestation.
+  # This is what lets the job publish with no long-lived token.
+  id-token: write
+
+jobs:
+  publish:
+    name: publish to npm
+    runs-on: ubuntu-latest
+    environment: npm-publish
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      # Trusted publishing and provenance need npm >= 11.5.1. Node 22 ships an
+      # older npm, so upgrade it explicitly rather than hoping.
+      - name: Upgrade npm
+        run: npm install -g npm@latest
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Configure git
+        run: |
+          git config --global user.name "ci"
+          git config --global user.email "ci@example.com"
+          git config --global init.defaultBranch main
+          git config --global protocol.file.allow always
+
+      - name: Test
+        run: pnpm test
+
+      # A release tag that disagrees with package.json is the classic way to
+      # publish the wrong thing. Fail loudly instead.
+      - name: Check version matches the release tag
+        if: github.event_name == 'release'
+        run: |
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "package.json: $PKG_VERSION"
+          echo "release tag:  $TAG_VERSION"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::package.json version ($PKG_VERSION) does not match the release tag ($TAG_VERSION)."
+            echo "::error::Bump the version, commit, and recreate the release."
+            exit 1
+          fi
+
+      - name: Refuse to republish an existing version
+        if: github.event_name == 'release'
+        run: |
+          NAME="$(node -p "require('./package.json').name")"
+          VERSION="$(node -p "require('./package.json').version")"
+          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+            echo "::error::$NAME@$VERSION is already published. Versions on npm are immutable."
+            exit 1
+          fi
+
+      - name: Show what will be published
+        run: npm pack --dry-run
+
+      # pnpm has no --provenance flag, so the publish itself uses the npm CLI.
+      # pnpm still owns dependency installation and the test run above.
+      - name: Publish
+        if: github.event_name == 'release' || inputs.dry-run == false
+        run: npm publish --provenance --access public
+        env:
+          # Not needed once Trusted Publishing is configured on npmjs.com; keep
+          # it so the first release works before that is set up. npm prefers
+          # OIDC when the registry has a trusted publisher for this repo.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Dry run summary
+        if: github.event_name == 'workflow_dispatch' && inputs.dry-run == true
+        run: echo "Dry run only — nothing was published."

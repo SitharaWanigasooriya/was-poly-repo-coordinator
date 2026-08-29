@@ -1,0 +1,9 @@
+node_modules/
+
+# Word lock files, created while a .docx in docs/ is open
+~$*.docx
+
+# Snapshot journal. The snapshots themselves live in refs/poly/safety/* inside
+# each repo, so deleting this directory loses no work — poly rebuilds the list
+# by reading refs.
+.poly/

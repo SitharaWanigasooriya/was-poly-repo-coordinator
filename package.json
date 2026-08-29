@@ -1,0 +1,49 @@
+{
+  "name": "@wanigasooriya/poly",
+  "version": "0.1.0",
+  "description": "Safe coordination of change sets across a Git superproject and its submodules. Your local work is never destroyed.",
+  "bin": {
+    "poly": "bin/poly.js"
+  },
+  "main": "src/cli.js",
+  "type": "commonjs",
+  "scripts": {
+    "test": "node test/run.js",
+    "prepublishOnly": "node test/run.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "packageManager": "pnpm@11.24.0",
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "git",
+    "submodules",
+    "submodule",
+    "monorepo",
+    "poly-repo",
+    "polyrepo",
+    "superproject",
+    "changeset",
+    "cli"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wanigasooriya/was-poly-repo-coordinator.git"
+  },
+  "bugs": {
+    "url": "https://github.com/wanigasooriya/was-poly-repo-coordinator/issues"
+  },
+  "homepage": "https://github.com/wanigasooriya/was-poly-repo-coordinator#readme",
+  "author": "Sithara Wanigasooriya",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}
