@@ -46,7 +46,10 @@ function assert(cond, message) {
 
 function assertEqual(actual, expected, message) {
   if (actual !== expected) {
-    throw new Error(`${message || 'not equal'}\n  expected: ${expected}\n  actual:   ${actual}`);
+    // Quoted, so a difference in invisible characters — a stray CR, a trailing
+    // space — cannot print as two identical-looking lines.
+    const show = v => (typeof v === 'string' ? JSON.stringify(v) : String(v));
+    throw new Error(`${message || 'not equal'}\n  expected: ${show(expected)}\n  actual:   ${show(actual)}`);
   }
 }
 
@@ -286,6 +289,25 @@ test('apply mode restores content and is itself reversible', tmp => {
   // And the state we replaced is still recoverable.
   safety.restoreSnapshot(ws, safety.findSnapshot(ws, before.id), { mode: 'apply' });
   assertEqual(fs.readFileSync(path.join(repo, 'work.txt'), 'utf8'), 'broken\n', 'apply was not reversible');
+});
+
+test('restores bytes exactly in a repo that rewrites line endings', tmp => {
+  const repo = makeRepo(path.join(tmp, 'repo'));
+  // The Git for Windows installer default. Set on the repo so this exercises
+  // the same conversion on every platform, not only on a Windows runner.
+  sh(['config', 'core.autocrlf', 'true'], repo);
+
+  const lf = '#!/bin/sh\nexit 0\n';
+  fs.writeFileSync(path.join(repo, 'entrypoint.sh'), lf);
+
+  const ws = fakeWorkspace(repo, []);
+  const snap = safety.snapshotAll(ws, { label: 'lf line endings' });
+
+  fs.writeFileSync(path.join(repo, 'entrypoint.sh'), 'clobbered\n');
+  safety.restoreSnapshot(ws, safety.findSnapshot(ws, snap.id), { mode: 'apply' });
+
+  assertEqual(fs.readFileSync(path.join(repo, 'entrypoint.sh'), 'utf8'), lf,
+    'restore rewrote line endings instead of giving the bytes back');
 });
 
 test('snapshots stay discoverable after .poly is deleted', tmp => {

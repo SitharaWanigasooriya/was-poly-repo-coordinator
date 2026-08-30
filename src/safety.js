@@ -95,10 +95,13 @@ function snapshotRepo(repoPath, { id, label, includeIgnored = false, name } = {}
 
     // Stage everything in the working tree into the throwaway index.
     // -A picks up modifications, deletions and untracked files.
+    // exactBytes: a snapshot stores the bytes on disk, so that restoring it
+    // reproduces them. Letting the clean filter normalise here would mean a
+    // file kept as LF in a core.autocrlf=true repo could not be given back.
     const addArgs = ['add', '-A'];
     if (includeIgnored) addArgs.push('--force');
     addArgs.push('--', '.');
-    g.git(addArgs, { cwd: repoPath, env });
+    g.git(addArgs, { cwd: repoPath, env, exactBytes: true });
 
     const tree = g.git(['write-tree'], { cwd: repoPath, env });
 
@@ -322,7 +325,7 @@ function restoreSnapshot(workspace, snapshot, { mode = 'branch', branchName } = 
         // Destructive to the *current* file contents, which is why the caller
         // snapshots first; nothing on disk is deleted by this.
         g.git(['restore', '--source', entry.sha, '--staged', '--worktree', '--', '.'],
-          { cwd: entry.path, allowDestructive: true });
+          { cwd: entry.path, allowDestructive: true, exactBytes: true });
         r.ok = true;
         r.action = 'files restored into working tree';
       }

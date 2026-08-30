@@ -123,6 +123,22 @@ const DESTRUCTIVE_RULES = [
   },
 ];
 
+/**
+ * Config that turns off git's line-ending rewriting for a single command.
+ *
+ * Snapshot capture and restore must move bytes, not git's idea of them. Under
+ * `core.autocrlf=true` — the Git for Windows installer default — `add` strips
+ * CR on the way into a snapshot and `restore` writes CRLF back out, so a
+ * round trip silently rewrites the line endings of every text file, including
+ * ones deliberately kept as LF. `core.eol=lf` covers the same conversion when
+ * it is driven by a `text` attribute instead of by autocrlf, since the default
+ * (`native`) means CRLF on Windows.
+ *
+ * A repo that pins `eol=crlf` in .gitattributes still gets CRLF: that is an
+ * explicit in-tree policy rather than an ambient machine setting.
+ */
+const EXACT_BYTES_CONFIG = ['-c', 'core.autocrlf=false', '-c', 'core.eol=lf'];
+
 function assertSafe(args) {
   for (const rule of DESTRUCTIVE_RULES) {
     let hit = false;
@@ -142,10 +158,15 @@ function assertSafe(args) {
  * opts.allowFail      return {ok:false} instead of throwing
  * opts.allowDestructive  bypass the safety blocklist (one caller only)
  * opts.env            extra environment variables
+ * opts.exactBytes     disable line-ending conversion (snapshot capture/restore)
  * opts.input          stdin
  */
 function git(args, opts = {}) {
   if (!opts.allowDestructive) assertSafe(args);
+
+  // Injected after assertSafe, never before: every blocklist rule matches on
+  // args[0], so prepending flags to what it inspects would blind all of them.
+  const argv = opts.exactBytes ? [...EXACT_BYTES_CONFIG, ...args] : args;
 
   const env = { ...process.env, ...(opts.env || {}) };
   // Keep git non-interactive: never pop a credential prompt or a pager mid-command.
@@ -154,7 +175,7 @@ function git(args, opts = {}) {
   env.GIT_OPTIONAL_LOCKS = '0';
 
   try {
-    const out = execFileSync('git', args, {
+    const out = execFileSync('git', argv, {
       cwd: opts.cwd,
       env,
       encoding: 'utf8',
