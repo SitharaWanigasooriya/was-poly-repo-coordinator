@@ -48,8 +48,8 @@ jobs:
 
       - name: Configure git
         run: |
-          git config --global user.name "ci"
-          git config --global user.email "ci@example.com"
+          git config --global user.name "sithara"
+          git config --global user.email "sitharawanigasooriya@gmail.com"
           git config --global init.defaultBranch main
           git config --global protocol.file.allow always
 
