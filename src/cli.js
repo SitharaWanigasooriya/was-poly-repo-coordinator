@@ -38,9 +38,19 @@ for (const [name, cmd] of Object.entries(COMMANDS)) {
   for (const alias of cmd.aliases || []) ALIASES[alias] = name;
 }
 
+// Commands that wrap another program. Once that program's own name is reached,
+// the rest of the line belongs to it: poly must not claim its flags. Keyed by
+// canonical name, so aliases resolve here too.
+const VERBATIM_TAIL = new Set(['run']);
+
 /**
  * Minimal parser: --flag, --flag=value, --no-flag, -abc, then positionals.
- * Everything after `--` is positional verbatim, so `poly run` can take flags.
+ *
+ * Everything after `--` is positional verbatim. So is everything after the
+ * program name given to a VERBATIM_TAIL command, because `--` alone cannot be
+ * relied on: PowerShell's parameter binder eats a bare `--` before the .ps1
+ * shim passes $args on, which would silently turn `run -- git checkout -b x`
+ * into `git checkout x`.
  */
 function parseArgs(argv) {
   const flags = {};
@@ -84,6 +94,11 @@ function parseArgs(argv) {
     }
 
     positional.push(arg);
+
+    // positional[0] is the command, positional[1] the program it wraps.
+    if (positional.length === 2 && VERBATIM_TAIL.has(ALIASES[positional[0]] || positional[0])) {
+      passthrough = true;
+    }
   }
 
   return { flags, positional };

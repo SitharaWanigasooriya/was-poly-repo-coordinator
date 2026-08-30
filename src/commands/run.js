@@ -78,10 +78,13 @@ module.exports = {
   run,
   aliases: ['foreach', 'each'],
   help: {
-    usage: 'poly run <command...> [--members-only] [--keep-going] [--no-save]',
+    usage: 'poly run [--members-only] [--keep-going] [--no-save] <command...>',
     summary: 'Run one command in every repo',
     detail: [
       'Snapshots everything first, so an unexpected command cannot cost you work.',
+      '',
+      "Everything after the program's name is passed to it untouched, so its own",
+      "flags stay its own. poly's flags therefore go before that name.",
       '',
       '  --members-only  skip the superproject',
       '  --keep-going    continue after a repo fails (default: stop)',
@@ -89,8 +92,8 @@ module.exports = {
       '',
       'Examples:',
       '  poly run git status -s',
-      '  poly run git log --oneline -3',
-      '  poly run npm test --keep-going',
+      '  poly run git checkout -b 1.x.x',
+      '  poly run --keep-going npm test',
     ].join('\n'),
   },
 };

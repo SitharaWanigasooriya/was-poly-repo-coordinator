@@ -228,24 +228,22 @@ There is no `poly checkout` and no `poly branch`. Fan-out is `poly run`, which
 snapshots everything first, so creating a branch in every repo is:
 
 ```sh
-poly run -- git checkout -b 1.x.x
+poly run git checkout -b 1.x.x
 ```
 
-**The `--` is required.** The argument parser consumes short flags before it
-reaches positionals, so without it `-b` is read as a flag to `poly` itself and
-the repos are handed a different command:
-
-| Invocation | What each repo actually runs |
-|---|---|
-| `poly run git checkout -b 1.x.x` | `git checkout 1.x.x` — wrong |
-| `poly run -- git checkout -b 1.x.x` | `git checkout -b 1.x.x` |
-
-Flags for `poly run` go *before* the `--`:
+Everything after the program's name — here `git` — is passed to it untouched, so
+`-b` reaches git rather than being read as a flag to poly. Poly's own flags go
+*before* that name:
 
 ```sh
-poly run --members-only -- git checkout -b 1.x.x   # submodules only
-poly run --keep-going   -- git checkout -b 1.x.x   # continue past a repo that fails
+poly run --members-only git checkout -b 1.x.x   # submodules only
+poly run --keep-going   git checkout -b 1.x.x   # continue past a repo that fails
 ```
+
+A `--` separator is still accepted and changes nothing, but it is not needed and
+is best left out: PowerShell's parameter binder eats a bare `--` before the
+`poly.ps1` shim ever passes `$args` on, so it is the one form that behaves
+differently across shells.
 
 `checkout -b` discards nothing: it carries uncommitted changes across, and git
 refuses outright if anything would be overwritten. For a submodule sitting on a
@@ -259,7 +257,7 @@ pass it. There, the snapshot is the safety net, not the blocklist.
 Confirm where everything landed:
 
 ```sh
-poly run -- git branch --show-current
+poly run git branch --show-current
 ```
 
 Then decide about policy. Two things key off `protectedBranch` in `poly.json`:

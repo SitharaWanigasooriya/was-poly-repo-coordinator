@@ -519,6 +519,36 @@ test('parses flags, negations and passthrough', () => {
   assertEqual(d.positional.join(' '), 'run git --version', 'passthrough after -- failed');
 });
 
+test('run passes the wrapped program its own flags, with or without --', () => {
+  const { parseArgs } = require('../src/cli');
+
+  // The bug this prevents: -b claimed by poly, so every repo ran
+  // `git checkout 1.x.x` — a switch to a branch that does not exist yet.
+  const bare = parseArgs(['run', 'git', 'checkout', '-b', '1.x.x']);
+  assertEqual(bare.positional.join(' '), 'run git checkout -b 1.x.x', 'short flag was swallowed');
+  assertEqual(bare.flags.b, undefined, 'poly claimed a flag belonging to git');
+
+  // An explicit -- still works, and must not show up in the command.
+  const dashed = parseArgs(['run', '--', 'git', 'checkout', '-b', '1.x.x']);
+  assertEqual(dashed.positional.join(' '), bare.positional.join(' '), '-- changed the result');
+
+  // poly's own flags come before the program name.
+  const mine = parseArgs(['run', '--keep-going', 'npm', 'test', '--bail']);
+  assertEqual(mine.flags['keep-going'], true, 'poly flag before the program was not read');
+  assertEqual(mine.positional.join(' '), 'run npm test --bail', 'program flags were not passed through');
+
+  // Aliases resolve to the same rule.
+  for (const alias of ['foreach', 'each']) {
+    const a = parseArgs([alias, 'git', 'log', '--oneline', '-3']);
+    assertEqual(a.positional.join(' '), `${alias} git log --oneline -3`, `${alias} did not pass through`);
+  }
+
+  // Commands that are not wrappers keep parsing flags as before.
+  const s = parseArgs(['restore', 'abc', '--branch', 'my-branch', '--apply']);
+  assertEqual(s.flags.branch, 'my-branch', 'non-wrapper command lost a flag');
+  assertEqual(s.flags.apply, true, 'non-wrapper command lost a flag');
+});
+
 test('every command exposes help metadata', () => {
   const { COMMANDS } = require('../src/cli');
   for (const [name, cmd] of Object.entries(COMMANDS)) {
