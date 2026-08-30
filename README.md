@@ -72,6 +72,55 @@ pnpm link --global     # gives you a global `poly` pointing at your working copy
 pnpm test
 ```
 
+## Update
+
+Check what you have and what is published:
+
+```sh
+poly --version                                    # what is installed
+pnpm view @wanigasooriya-solutions/poly version   # what is on npm
+```
+
+Then upgrade to the latest release:
+
+```sh
+pnpm add -g @wanigasooriya-solutions/poly@latest
+poly --version                                    # confirm it moved
+```
+
+<details>
+<summary>npm / yarn / a specific version / a linked clone</summary>
+
+```sh
+npm  install -g @wanigasooriya-solutions/poly@latest
+yarn global upgrade @wanigasooriya-solutions/poly
+
+# pin to an exact release instead of the latest one
+pnpm add -g @wanigasooriya-solutions/poly@0.2.0
+
+# see every published version
+pnpm view @wanigasooriya-solutions/poly versions
+```
+
+If you installed with `pnpm link --global`, there is nothing to reinstall — the
+global `poly` points at your working copy, so pulling is the update:
+
+```sh
+git pull
+pnpm install
+pnpm test
+```
+</details>
+
+`pnpm dlx` / `npx` users are already on the latest release each run, though the
+package-manager cache can serve an older copy; force a fresh fetch with
+`pnpm dlx @wanigasooriya-solutions/poly@latest status` or
+`npx @wanigasooriya-solutions/poly@latest status`.
+
+Updating only replaces the CLI. It does not touch `poly.json`, `.poly/` or any
+`refs/poly/safety/<id>` snapshot in your repos — snapshots taken by an older
+version stay readable by the new one.
+
 ## Uninstall
 
 Two separate things, and only the first is required: removing the CLI, and
