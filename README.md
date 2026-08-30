@@ -72,6 +72,114 @@ pnpm link --global     # gives you a global `poly` pointing at your working copy
 pnpm test
 ```
 
+## Uninstall
+
+Two separate things, and only the first is required: removing the CLI, and
+removing what poly wrote into your repos.
+
+### Remove the CLI
+
+```sh
+pnpm remove -g @wanigasooriya-solutions/poly
+```
+
+<details>
+<summary>npm / yarn / a linked clone</summary>
+
+```sh
+npm  uninstall -g @wanigasooriya-solutions/poly
+yarn global remove @wanigasooriya-solutions/poly
+
+# if you installed with `pnpm link --global`, unlink from inside the clone
+pnpm unlink --global
+```
+</details>
+
+Check it is gone with `which poly` (`where.exe poly` on Windows) — it should
+print nothing. There is nothing else to clean up on your machine: poly has no
+runtime dependencies, no config directory and no cache. Nothing was run with
+elevated privileges and no shell profile was modified.
+
+`pnpm dlx` / `npx` users have nothing to uninstall; clear the package manager
+cache if you want the download back (`pnpm store prune`, `npm cache clean --force`).
+
+### What stays behind in your repos
+
+Removing the CLI changes nothing inside your repositories. This is what poly
+wrote there:
+
+| What | Where | Cost of leaving it |
+|---|---|---|
+| `poly.json` | superproject root | one committed policy file |
+| `.poly/snapshots.json` | superproject root, gitignored | a few kB, rebuildable from refs |
+| `refs/poly/safety/<id>` | every repo, per snapshot | one commit object per repo |
+| `poly/snap/<id>` branches | wherever you ran `poly restore` | a branch ref each |
+
+**Leaving the safety refs in place is the recommended default.** For any
+uncommitted or untracked work you snapshotted, they are the only copy. They cost
+disk and nothing else: normal git operations never walk them, they are not
+pushed unless you push them by name, and they do not affect `status`, `log` or
+`gc`.
+
+### Removing them anyway
+
+Recover anything you still want **first** — once the refs are gone the tool that
+made them is uninstalled too:
+
+```sh
+poly snapshots                                    # while poly is still installed
+poly restore <id> --apply --yes                   # anything worth keeping
+```
+
+Deletion cannot be done through poly: its git wrapper refuses `update-ref -d`
+and `branch -D` by design. So the commands below are plain git, run without any
+of the protection the rest of this README describes. Read each one before you
+run it.
+
+```sh
+rm poly.json
+rm -rf .poly
+```
+
+Then, in the superproject and in **each** submodule — look before you delete:
+
+```sh
+git for-each-ref --format='%(refname)' 'refs/poly/**'          # what is there
+git for-each-ref --format='%(refname)' 'refs/poly/**' \
+  | while read -r ref; do git update-ref -d "$ref"; done       # delete it
+
+git branch --list 'poly/snap/*'                                # restore branches
+git branch -D <branch>
+```
+
+To sweep every submodule in one go:
+
+```sh
+git submodule foreach --recursive \
+  "git for-each-ref --format='%(refname)' 'refs/poly/**' | while read -r ref; do git update-ref -d \"\$ref\"; done"
+```
+
+<details>
+<summary>PowerShell</summary>
+
+```powershell
+Remove-Item poly.json
+Remove-Item -Recurse -Force .poly
+git for-each-ref --format='%(refname)' 'refs/poly/**' | ForEach-Object { git update-ref -d $_ }
+```
+</details>
+
+Deleting the refs only makes the commits unreachable; the objects survive until
+git collects them. If you want the snapshotted work actually gone — including
+work that was never committed anywhere else — finish with:
+
+```sh
+git reflog expire --expire-unreachable=now --all
+git gc --prune=now
+```
+
+That step is irreversible.
+
 ## Getting started
 
 ```sh
@@ -105,7 +213,7 @@ poly check        # Gate 1: is every submodule pointer safely merged?
 | Command | What it does |
 |---|---|
 | `poly sync` | Rescue orphaned commits, attach detached HEADs, fetch. Forces nothing. |
-| `poly run <cmd>` | Run one command in every repo (snapshots first). |
+| `poly run <cmd>` | Run one command in every repo (snapshots first). See [Branching across every repo](#branching-across-every-repo). |
 | `poly init` | Write `poly.json` from `.gitmodules`. |
 
 Aliases: `st`/`s` → status, `dr` → doctor, `snap` → save, `ls`/`list` → snapshots,
@@ -113,6 +221,52 @@ Aliases: `st`/`s` → status, `dr` → doctor, `snap` → save, `ls`/`list` → 
 
 Global: `-C <dir>` run as if from another directory, `--json` machine-readable
 output, `POLY_ASCII=1` plain symbols, `NO_COLOR=1` no colour.
+
+## Branching across every repo
+
+There is no `poly checkout` and no `poly branch`. Fan-out is `poly run`, which
+snapshots everything first, so creating a branch in every repo is:
+
+```sh
+poly run -- git checkout -b 1.x.x
+```
+
+**The `--` is required.** The argument parser consumes short flags before it
+reaches positionals, so without it `-b` is read as a flag to `poly` itself and
+the repos are handed a different command:
+
+| Invocation | What each repo actually runs |
+|---|---|
+| `poly run git checkout -b 1.x.x` | `git checkout 1.x.x` — wrong |
+| `poly run -- git checkout -b 1.x.x` | `git checkout -b 1.x.x` |
+
+Flags for `poly run` go *before* the `--`:
+
+```sh
+poly run --members-only -- git checkout -b 1.x.x   # submodules only
+poly run --keep-going   -- git checkout -b 1.x.x   # continue past a repo that fails
+```
+
+`checkout -b` discards nothing: it carries uncommitted changes across, and git
+refuses outright if anything would be overwritten. For a submodule sitting on a
+detached HEAD it creates the branch at exactly the commit the superproject
+pointer records, so nothing moves.
+
+`poly run` spawns your command directly rather than through the git wrapper, so
+the refusal list under [The promise](#the-promise) does **not** apply to what you
+pass it. There, the snapshot is the safety net, not the blocklist.
+
+Confirm where everything landed:
+
+```sh
+poly run -- git branch --show-current
+```
+
+Then decide about policy. Two things key off `protectedBranch` in `poly.json`:
+`poly sync` re-attaches a detached HEAD to it, and `poly check` asks whether
+pointers are merged into it. For a short-lived branch, leave it alone. If
+`1.x.x` becomes the line you release from, change `defaults.protectedBranch`
+— and any per-member override — to match.
 
 ## Gate 1 — what it actually checks
 
