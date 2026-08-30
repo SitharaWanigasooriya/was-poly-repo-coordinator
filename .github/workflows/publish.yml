@@ -25,6 +25,11 @@ jobs:
     runs-on: ubuntu-latest
     environment: npm-publish
 
+    # Lifted to job env so the steps below can branch on whether a token still
+    # exists: the `secrets` context is not available in a step-level `if`.
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -36,7 +41,12 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          registry-url: https://registry.npmjs.org
+          # Deliberately no registry-url. It writes an .npmrc containing
+          # `_authToken=${NODE_AUTH_TOKEN}`, which npm cannot expand once the
+          # token is deleted, and which presents empty credentials that stop
+          # npm from reaching for OIDC. Auth is set up explicitly below, only
+          # while a token is actually in use. npm publishes to the public
+          # registry by default, so nothing else needs the setting.
 
       # Trusted publishing and provenance need npm >= 11.5.1. Node 22 ships an
       # older npm, so upgrade it explicitly rather than hoping.
@@ -84,16 +94,24 @@ jobs:
       - name: Show what will be published
         run: npm pack --dry-run
 
+      # Bootstrap only. A package that does not exist yet cannot have a trusted
+      # publisher attached to it, so the first release has to authenticate with
+      # a token. Once @wanigasooriya-solutions/poly is on the registry and a
+      # trusted publisher is configured for this repo, delete the NPM_TOKEN
+      # secret: this step then skips itself and npm authenticates over OIDC,
+      # which is both the end state and what npm is steering everyone toward —
+      # 2FA-bypass tokens lose direct publish in January 2027.
+      - name: Authenticate with the npm token
+        if: env.NPM_TOKEN != ''
+        run: npm config set //registry.npmjs.org/:_authToken "$NPM_TOKEN"
+
       # pnpm has no --provenance flag, so the publish itself uses the npm CLI.
       # pnpm still owns dependency installation and the test run above.
+      # Provenance and public access both come from publishConfig in
+      # package.json, so they are not repeated as flags here.
       - name: Publish
         if: github.event_name == 'release' || inputs.dry-run == false
-        run: npm publish --provenance --access public
-        env:
-          # Not needed once Trusted Publishing is configured on npmjs.com; keep
-          # it so the first release works before that is set up. npm prefers
-          # OIDC when the registry has a trusted publisher for this repo.
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish
 
       - name: Dry run summary
         if: github.event_name == 'workflow_dispatch' && inputs.dry-run == true
