@@ -74,32 +74,70 @@ pnpm test
 
 ## Update
 
-Check what you have and what is published:
+If you installed with `pnpm add -g @wanigasooriya-solutions/poly`, upgrade with:
+
+```sh
+pnpm add -g @wanigasooriya-solutions/poly@latest
+poly --version
+```
+
+If that reports the version you already had, you have hit one of the two causes
+below. Both are pnpm behaviours rather than anything poly does.
+
+### `@latest` installs an older version anyway
+
+pnpm 11 applies a **minimum release age** to newly published packages: a version
+uploaded minutes ago is held back, and `@latest` quietly resolves to the newest
+release *older* than that cooldown. The install reports success and prints the
+old version number, which is what makes this confusing.
+
+Name the exact version to bypass the cooldown:
+
+```sh
+pnpm view @wanigasooriya-solutions/poly version    # what is really newest
+pnpm add -g @wanigasooriya-solutions/poly@0.2.0    # install it by number
+```
+
+pnpm records the override in `minimumReleaseAgeExclude` in its global
+`pnpm-workspace.yaml` and installs immediately. Waiting out the cooldown and
+re-running `@latest` works too, if you would rather not pin.
+
+### `pnpm add -g` fails without installing anything
+
+```
+[ERROR] The configured global bin directory "…\pnpm-global\bin" is not in PATH
+```
+
+pnpm refuses **every** global operation when its bin directory is missing from
+PATH — it does not install and then fail to link, it does nothing at all and
+exits non-zero. Any `pnpm add -g` run from such a shell was a no-op, so the
+version never moved.
+
+```sh
+pnpm setup     # registers the bin dir; open a new shell afterwards
+```
+
+The directory must be on PATH exactly as pnpm reports it — on Windows that is
+`%USERPROFILE%\pnpm-global\bin`, not the `pnpm-global` parent. A shell started
+before `pnpm setup` ran keeps the old environment, so check in a fresh terminal.
+
+<details>
+<summary>Check what is actually installed</summary>
 
 ```sh
 poly --version                                    # what is installed
 pnpm view @wanigasooriya-solutions/poly version   # what is on npm
+pnpm view @wanigasooriya-solutions/poly versions  # every published version
+pnpm list -g --depth 0                            # what pnpm thinks it installed
 ```
-
-Then upgrade to the latest release:
-
-```sh
-pnpm add -g @wanigasooriya-solutions/poly@latest
-poly --version                                    # confirm it moved
-```
+</details>
 
 <details>
-<summary>npm / yarn / a specific version / a linked clone</summary>
+<summary>npm / yarn / a linked clone</summary>
 
 ```sh
 npm  install -g @wanigasooriya-solutions/poly@latest
 yarn global upgrade @wanigasooriya-solutions/poly
-
-# pin to an exact release instead of the latest one
-pnpm add -g @wanigasooriya-solutions/poly@0.2.0
-
-# see every published version
-pnpm view @wanigasooriya-solutions/poly versions
 ```
 
 If you installed with `pnpm link --global`, there is nothing to reinstall — the
