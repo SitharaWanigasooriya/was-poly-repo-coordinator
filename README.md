@@ -1,6 +1,6 @@
 # poly — WAS Poly-Repo Coordination Tool
 
-[![CI](https://github.com/wanigasooriya-solutions/was-poly-repo-coordinator/actions/workflows/ci.yml/badge.svg)](https://github.com/wanigasooriya-solutions/was-poly-repo-coordinator/actions/workflows/ci.yml)
+[![CI](https://github.com/SitharaWanigasooriya/was-poly-repo-coordinator/actions/workflows/ci.yml/badge.svg)](https://github.com/SitharaWanigasooriya/was-poly-repo-coordinator/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@wanigasooriya-solutions/poly)](https://www.npmjs.com/package/@wanigasooriya-solutions/poly)
 
 Safe coordination of change sets across a Git superproject and its submodules.
@@ -500,16 +500,72 @@ existing version, then publishes.
 
 ### Every release after that
 
+`main` already carries the next version number — the previous release bumped it
+(see [Version bumping](#version-bumping)). So a patch release is just a tag:
+
 ```sh
-pnpm version patch        # or minor / major — bumps package.json and makes a git tag
-git push --follow-tags
+git pull
+VERSION="$(node -p "require('./package.json').version")"
+git tag -a "v$VERSION" -m "v$VERSION"     # annotated: --follow-tags skips lightweight tags
+git push origin main --follow-tags
 ```
 
-Then on GitHub: *Releases* → *Draft a new release* → pick the `v0.1.1` tag →
+For a minor or major release, set the number before tagging:
+
+```sh
+pnpm version minor --no-git-tag-version   # or major
+git commit -am "Bump version to $(node -p "require('./package.json').version")"
+git push
+```
+
+Then on GitHub: *Releases* → *Draft a new release* → pick the tag →
 *Publish release*. The workflow takes it from there.
 
 To rehearse without publishing, run the **Publish** workflow manually from the
 Actions tab with *dry-run* left checked — it packs and validates, then stops.
+
+### Version bumping
+
+npm versions are immutable, so the number in `package.json` is spent the moment
+a release publishes. Leaving it there means `main` describes a version that has
+already shipped, and the next release opens by tripping the "version matches the
+release tag" check.
+
+The `bump` job in `publish.yml` closes that gap. After a successful publish it
+raises `package.json` on `main` and pushes one
+`Bump version to X after publishing Y [skip ci]` commit. It runs only when a
+publish actually happened, so dry runs and skipped publishes leave `main` alone,
+and it stands down if `main` has already been bumped by hand.
+
+It moves the **patch** level by default. That is deliberate rather than lazy:
+the job runs the instant a release ships, before any of the next release's
+commits exist, so there is nothing to infer a larger bump from. The patch bump
+is a placeholder that keeps `main` ahead of npm — raise it when the work that
+earns a minor or major actually lands.
+
+To choose the level explicitly, put a line anywhere in the release notes:
+
+```
+bump: minor
+```
+
+`major`, `minor`, `patch` and `none` are accepted, and `none` skips the bump
+entirely. Alternatively run the workflow by hand from the Actions tab and pick
+from the *bump* dropdown, which takes precedence over the release notes.
+
+| Released | Level | `main` becomes |
+|---|---|---|
+| `0.2.0` | `patch` (default) | `0.2.1` |
+| `0.2.0` | `minor` | `0.3.0` |
+| `0.2.0` | `major` | `1.0.0` |
+| `0.9.0` | `minor` | `0.10.0` |
+
+The arithmetic is `npm version`, never a regex, so `0.9.0` → `0.10.0` and
+prerelease tags behave the way semver says.
+
+If `main` is a protected branch the push is rejected and the job fails with the
+version it wanted to set, leaving the publish itself successful — bump by hand,
+or give the job a bypass or an app token to keep it automatic.
 
 ### What ships
 

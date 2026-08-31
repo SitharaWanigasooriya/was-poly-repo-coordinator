@@ -12,12 +12,20 @@ on:
         description: 'Pack and validate without publishing'
         type: boolean
         default: true
+      bump:
+        description: 'Version bump applied to main after a successful publish'
+        type: choice
+        options: [auto, patch, minor, major, none]
+        default: auto
 
+# Least privilege by default; the bump job widens this for itself alone.
 permissions:
   contents: read
-  # Required for npm Trusted Publishing (OIDC) and for provenance attestation.
-  # This is what lets the job publish with no long-lived token.
-  id-token: write
+
+# Two releases bumping main at once would race on the push. Serialise them.
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   publish:
@@ -25,19 +33,31 @@ jobs:
     runs-on: ubuntu-latest
     environment: npm-publish
 
+    permissions:
+      contents: read
+      # Required for npm Trusted Publishing (OIDC) and for provenance attestation.
+      # This is what lets the job publish with no long-lived token.
+      id-token: write
+
+    # Consumed by the bump job, which must not run unless a publish actually
+    # happened — a dry run and a skipped publish both have to leave main alone.
+    outputs:
+      published: ${{ steps.publish.outputs.published }}
+      version: ${{ steps.publish.outputs.version }}
+
     # Lifted to job env so the steps below can branch on whether a token still
     # exists: the `secrets` context is not available in a step-level `if`.
     env:
       NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -110,9 +130,134 @@ jobs:
       # Provenance and public access both come from publishConfig in
       # package.json, so they are not repeated as flags here.
       - name: Publish
+        id: publish
         if: github.event_name == 'release' || inputs.dry-run == false
-        run: npm publish
+        run: |
+          npm publish
+          echo "published=true" >> "$GITHUB_OUTPUT"
+          echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
 
       - name: Dry run summary
         if: github.event_name == 'workflow_dispatch' && inputs.dry-run == true
         run: echo "Dry run only — nothing was published."
+
+  # The version just published is now immutable on npm, so leaving it in
+  # package.json means main describes a release that has already shipped. This
+  # moves main onto the next development version, so the following release
+  # starts from a number nobody has taken.
+  bump:
+    name: bump version on main
+    needs: publish
+    if: needs.publish.outputs.published == 'true'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      # Release runs check out the tag in detached HEAD. The bump belongs on the
+      # branch, so check main out by name and take its full history.
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      # Precedence: an explicit workflow input, then a `bump: minor` line in the
+      # release notes, then patch.
+      #
+      # Patch is the default because this runs the moment a release ships, when
+      # the next release's commits do not exist yet — there is nothing to infer
+      # a larger bump from. It is a placeholder that keeps main ahead of npm;
+      # raise it to minor or major when the work that earns it actually lands.
+      - name: Decide the bump level
+        id: level
+        env:
+          INPUT_BUMP: ${{ inputs.bump }}
+          # Read through env, never interpolated into the script: release notes
+          # are attacker-controllable text and must not reach the shell as code.
+          RELEASE_BODY: ${{ github.event.release.body }}
+        run: |
+          set -euo pipefail
+          LEVEL=patch
+          SOURCE=default
+
+          if [ -n "${INPUT_BUMP:-}" ] && [ "$INPUT_BUMP" != auto ]; then
+            LEVEL="$INPUT_BUMP"
+            SOURCE="workflow input"
+          elif [ -n "${RELEASE_BODY:-}" ]; then
+            DIRECTIVE="$(printf '%s\n' "$RELEASE_BODY" | tr -d '\r' \
+              | sed -nE 's/^[[:space:]]*[Bb]ump:[[:space:]]*(major|minor|patch|none)[[:space:]]*$/\1/p' \
+              | head -n 1)"
+            if [ -n "$DIRECTIVE" ]; then
+              LEVEL="$DIRECTIVE"
+              SOURCE="release notes"
+            fi
+          fi
+
+          echo "Bump level: $LEVEL (from $SOURCE)"
+          echo "level=$LEVEL" >> "$GITHUB_OUTPUT"
+
+      # If main no longer holds the version that was just published, someone has
+      # already moved it on. Bumping again would skip a number for no reason.
+      - name: Check main still holds the published version
+        id: guard
+        env:
+          PUBLISHED: ${{ needs.publish.outputs.version }}
+        run: |
+          set -euo pipefail
+          MAIN_VERSION="$(node -p "require('./package.json').version")"
+          if [ "$MAIN_VERSION" != "$PUBLISHED" ]; then
+            echo "::notice::main is on $MAIN_VERSION but $PUBLISHED was published — already bumped, nothing to do."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # `npm version` owns the semver arithmetic — including 0.x, prerelease
+      # tags and the 0.9.0 -> 1.0.0 step — so no regex ever edits the number.
+      # --no-git-tag-version keeps the change to package.json: tags belong to
+      # the release, and a tag pushed from here would retrigger this workflow.
+      - name: Bump the version and push
+        if: steps.guard.outputs.skip == 'false' && steps.level.outputs.level != 'none'
+        env:
+          LEVEL: ${{ steps.level.outputs.level }}
+          PUBLISHED: ${{ needs.publish.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          NEW_VERSION="$(npm version "$LEVEL" --no-git-tag-version)"
+          NEW_VERSION="${NEW_VERSION#v}"
+          echo "$PUBLISHED -> $NEW_VERSION ($LEVEL)"
+
+          # [skip ci] stops this commit from spending a full CI matrix on a
+          # one-line version change the release has already tested.
+          git add package.json
+          git commit -m "Bump version to $NEW_VERSION after publishing $PUBLISHED [skip ci]"
+
+          # A push can lose a race with a merge that landed during the publish.
+          # Rebase the single bump commit and retry rather than failing a
+          # release that otherwise succeeded.
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              echo "Pushed $NEW_VERSION to main."
+              echo "package.json on main is now **$NEW_VERSION** (was $PUBLISHED, bumped $LEVEL)." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "Push rejected (attempt $attempt) — rebasing onto origin/main."
+            git fetch origin main
+            git rebase origin/main || {
+              echo "::error::Could not rebase the bump commit onto origin/main. Bump to $NEW_VERSION by hand."
+              exit 1
+            }
+          done
+
+          echo "::error::Could not push the version bump to main after 3 attempts."
+          echo "::error::If main is protected this job needs a bypass or an app token; bump to $NEW_VERSION by hand meanwhile."
+          exit 1
