@@ -20,9 +20,15 @@ const INVARIANT_NAMES = {
   E24: 'workspace — uncommitted work',
 };
 
-function run(args, ctx) {
+async function run(args, ctx) {
   const ws = m.loadWorkspace(ctx.cwd);
   const result = policy.checkAll(ws, { treeish: 'INDEX' });
+
+  const online = args.flags.online || process.env.POLY_ONLINE === '1';
+  if (online) {
+    await policy.augmentWithReviews(result, ws);
+  }
+
   const counts = policy.summarise(result.findings);
 
   if (ctx.json) {
@@ -89,6 +95,18 @@ function run(args, ctx) {
     console.log(indent(c.grey('poly snapshots   list them    poly restore <id>   bring one back'), '      '));
   }
 
+  // row.pinned comes from gate1 (checkAll) above — no extra git calls.
+  const pinnable = result.rows.filter(r => r.pinned !== undefined);
+  const pinnedCount = pinnable.filter(r => r.pinned).length;
+  if (pinnable.length) {
+    const line = `${pinnedCount}/${pinnable.length} pointer(s) pinned`;
+    if (pinnedCount === pinnable.length) console.log(`  ${ok(line)}`);
+    else {
+      console.log(`  ${info(line)}`);
+      console.log(indent(`${c.grey('fix:')} poly pin`, '      '));
+    }
+  }
+
   if (result.notChecked.length) {
     console.log(heading('  not checked'));
     for (const n of result.notChecked) console.log(`  ${info(n)}`);
@@ -109,11 +127,13 @@ module.exports = {
   run,
   aliases: ['dr'],
   help: {
-    usage: 'poly doctor [--json]',
+    usage: 'poly doctor [--online] [--json]',
     summary: 'Full diagnosis: every invariant, grouped, with fixes',
     detail: [
       'Read-only. Runs Gate 1 plus manifest-coherence and local-workspace checks,',
-      'and reports the state of your safety net.',
+      'reports pin coverage, and reports the state of your safety net.',
+      '',
+      '  --online   also check I3 (review integrity) against GitHub',
     ].join('\n'),
   },
 };

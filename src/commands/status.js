@@ -155,6 +155,13 @@ function run(args, ctx) {
     console.log(`    ${c.grey(`${dirty} repo(s) have uncommitted work —`)} ${c.bold('poly save')} ${c.grey('makes it restorable')}`);
   }
 
+  // row.pinned is already computed by gate1 (checkAll) — no extra git calls here.
+  const pinnable = result.rows.filter(r => r.pinned !== undefined);
+  const pinned = pinnable.filter(r => r.pinned).length;
+  if (pinnable.length && pinned < pinnable.length) {
+    console.log(`    ${c.grey(`${pinned}/${pinnable.length} pointers pinned —`)} ${c.bold('poly pin')} ${c.grey('makes them durable')}`);
+  }
+
   if (errors.length || warnings.length) {
     console.log(`    ${c.grey('run')} ${c.bold('poly doctor')} ${c.grey('for detail and suggested fixes')}`);
   }

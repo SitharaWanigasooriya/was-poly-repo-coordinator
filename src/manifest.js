@@ -30,6 +30,9 @@ const DEFAULT_MANIFEST = {
     blockPointerRegression: true,
     requirePins: false,
     requireMergedPointers: true,
+    // I3 (review integrity) is opt-in and only runs with `poly check --online`.
+    // Even then it reports rather than blocks until this is set true.
+    requireReviewedPointers: false,
   },
 };
 

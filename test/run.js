@@ -40,6 +40,13 @@ function test(name, fn) {
   }
 }
 
+// Async tests are queued and run after every sync test (see the runner at the
+// end of the file). Same fixture-dir lifecycle, just awaited.
+const asyncTests = [];
+function atest(name, fn) {
+  asyncTests.push({ name, fn });
+}
+
 function assert(cond, message) {
   if (!cond) throw new Error(message || 'assertion failed');
 }
@@ -517,6 +524,14 @@ test('parses flags, negations and passthrough', () => {
 
   const d = parseArgs(['run', '--', 'git', '--version']);
   assertEqual(d.positional.join(' '), 'run git --version', 'passthrough after -- failed');
+
+  // value flags: --changeset takes the next token; --member repeats into an array
+  const e = parseArgs(['land', '--changeset', '20260101-000000-aaaa', '--dry-run']);
+  assertEqual(e.flags.changeset, '20260101-000000-aaaa', '--changeset did not consume its value');
+  assertEqual(e.flags['dry-run'], true);
+
+  const f = parseArgs(['changeset', 'new', 'title', '--member', 'a', '--member', 'b']);
+  assertEqual(JSON.stringify(f.flags.member), '["a","b"]', 'repeated --member should accumulate');
 });
 
 test('run passes the wrapped program its own flags, with or without --', () => {
@@ -559,12 +574,265 @@ test('every command exposes help metadata', () => {
 
 /* ------------------------------------------------------------------ */
 
-console.log(`\n${passed} passed, ${failed} failed\n`);
-if (failed) {
-  for (const f of failures) {
-    console.log(`\x1b[31m${f.name}\x1b[39m`);
-    console.log(f.err.stack.split('\n').slice(0, 6).join('\n'));
-    console.log();
-  }
+console.log('\npins — durable pins');
+
+function landOnMain(sub, file, content, msg) {
+  fs.writeFileSync(path.join(sub, file), content);
+  sh(['add', '-A'], sub);
+  sh(['commit', '-q', '-m', msg], sub);
+  sh(['push', '-q', 'origin', 'HEAD:main'], sub);
+  sh(['fetch', '-q', 'origin'], sub);
 }
-process.exit(failed ? 1 : 0);
+
+test('poly pin writes a ref for the pointer and satisfies requirePins', tmp => {
+  const pins = require('../src/pins');
+  const { superRepo, sub } = makeSuperWithMember(tmp);
+  landOnMain(sub, 'lib.js', 'v2\n', 'v2');
+  sh(['add', 'libs/member'], superRepo);
+
+  const ws = manifest.loadWorkspace(superRepo);
+  const sha = g.gitlinksInIndex(superRepo).find(l => l.path === 'libs/member').sha;
+
+  ws.manifest.policy.requirePins = true;
+  assert(policy.gate1(ws, { treeish: 'INDEX' }).findings.some(f => f.invariant === 'I2'),
+    'expected an I2 finding before pinning');
+
+  const res = pins.pin(path.join(superRepo, 'libs', 'member'), { name: 'member', sha });
+  assert(res.ok, `pin failed: ${res.error}`);
+  assert(g.refExists(path.join(superRepo, 'libs', 'member'), res.ref), 'pin ref was not written');
+
+  assert(!policy.gate1(ws, { treeish: 'INDEX' }).findings.some(f => f.invariant === 'I2'),
+    'I2 finding should be gone once the pointer is pinned');
+});
+
+test('a pinned commit survives branch deletion and aggressive gc', tmp => {
+  const pins = require('../src/pins');
+  const { superRepo, sub } = makeSuperWithMember(tmp);
+  sh(['checkout', '-q', '-b', 'doomed'], sub);
+  fs.writeFileSync(path.join(sub, 'lib.js'), 'pinned work\n');
+  sh(['add', '-A'], sub);
+  sh(['commit', '-q', '-m', 'work'], sub);
+  const sha = sh(['rev-parse', 'HEAD'], sub);
+
+  pins.pin(sub, { name: 'member', sha });
+
+  sh(['checkout', '-q', 'main'], sub);
+  sh(['branch', '-q', '-D', 'doomed'], sub);
+  sh(['reflog', 'expire', '--expire=now', '--expire-unreachable=now', '--all'], sub);
+  sh(['gc', '--prune=now', '--aggressive', '-q'], sub);
+
+  assert(g.commitExists(sub, sha), 'pinned commit was garbage-collected');
+});
+
+/* ------------------------------------------------------------------ */
+
+console.log('\ngraph — dependsOn ordering');
+
+test('topoSort respects dependsOn and returns every member', () => {
+  const { topoSort } = require('../src/graph');
+  const members = [
+    { name: 'c', dependsOn: ['b'] },
+    { name: 'a', dependsOn: [] },
+    { name: 'b', dependsOn: ['a'] },
+    { name: 'd', dependsOn: [] },
+  ];
+  const { order } = topoSort(members);
+  const at = n => order.findIndex(m => m.name === n);
+  assertEqual(order.length, 4, 'every member should appear once');
+  assert(at('a') < at('b') && at('b') < at('c'), 'dependency order was violated');
+});
+
+test('topoSort reports unknown deps and throws on a cycle', () => {
+  const { topoSort } = require('../src/graph');
+  const { unknownDeps } = topoSort([{ name: 'a', dependsOn: ['ghost'] }]);
+  assertEqual(unknownDeps[0].missing[0], 'ghost');
+
+  const err = assertThrows(
+    () => topoSort([{ name: 'x', dependsOn: ['y'] }, { name: 'y', dependsOn: ['x'] }])
+  );
+  assert(/cycle/.test(err.message), `expected a cycle error, got: ${err.message}`);
+  assert(err.userFacing, 'a cycle error should be userFacing');
+});
+
+/* ------------------------------------------------------------------ */
+
+console.log('\ngithub — I3 review integrity');
+
+test('parseGithubRepo handles https and ssh, rejects non-github', () => {
+  const { parseGithubRepo } = require('../src/github');
+  assertEqual(JSON.stringify(parseGithubRepo('https://github.com/was-pos/pos-ms-auth-service.git')),
+    '{"owner":"was-pos","repo":"pos-ms-auth-service"}');
+  assertEqual(JSON.stringify(parseGithubRepo('git@github.com:o/r.git')), '{"owner":"o","repo":"r"}');
+  assertEqual(parseGithubRepo('https://gitlab.com/o/r.git'), null);
+  assertEqual(parseGithubRepo(null), null);
+});
+
+atest('augmentWithReviews maps merged+approved and not-merged via an injected transport', async tmp => {
+  const { superRepo } = makeSuperWithMember(tmp);
+  const ws = manifest.loadWorkspace(superRepo);
+  ws.members[0].url = 'https://github.com/o/r.git';
+
+  // merged + approved -> no I3 finding
+  const okResult = policy.gate1(ws, { treeish: 'INDEX' });
+  const transport = p => {
+    if (/\/commits\/.+\/pulls$/.test(p)) {
+      return { ok: true, status: 200, body: [{ number: 7, merged_at: '2026-01-01T00:00:00Z', base: { ref: 'main' } }] };
+    }
+    if (/\/pulls\/7\/reviews$/.test(p)) {
+      return { ok: true, status: 200, body: [{ user: { login: 'r' }, state: 'APPROVED' }] };
+    }
+    return { ok: false, status: 404, body: null };
+  };
+  await policy.augmentWithReviews(okResult, ws, { auth: { mode: 'token', token: 'x' }, transport });
+  assert(!okResult.findings.some(f => f.invariant === 'I3'), 'approved+merged should not raise I3');
+  assertEqual(okResult.rows[0].review.reviewDecision, 'approved');
+
+  // no merged PR -> an I3 finding
+  const badResult = policy.gate1(ws, { treeish: 'INDEX' });
+  await policy.augmentWithReviews(badResult, ws, {
+    auth: { mode: 'token', token: 'x' },
+    transport: () => ({ ok: true, status: 200, body: [] }),
+  });
+  assert(badResult.findings.some(f => f.invariant === 'I3'), 'a commit with no merged PR should raise I3');
+});
+
+atest('augmentWithReviews leaves I3 "not checked" when there is no auth', async tmp => {
+  const { superRepo } = makeSuperWithMember(tmp);
+  const ws = manifest.loadWorkspace(superRepo);
+  ws.members[0].url = 'https://github.com/o/r.git';
+  const result = policy.gate1(ws, { treeish: 'INDEX' });
+  await policy.augmentWithReviews(result, ws, { auth: { mode: 'none', reason: 'no GitHub auth' } });
+  assert(!result.findings.some(f => f.invariant === 'I3'), 'no auth must not invent findings');
+  assert(result.notChecked.some(n => n.startsWith('I3 ')), 'I3 should be reported as not checked');
+});
+
+/* ------------------------------------------------------------------ */
+
+console.log('\nchangeset — cross-repo tracking');
+
+test('changeset records branch + pointer, refresh sees the merge', tmp => {
+  const cs = require('../src/changeset');
+  const { superRepo, sub } = makeSuperWithMember(tmp);
+  sh(['checkout', '-q', '-b', 'feature/x'], sub);
+  fs.writeFileSync(path.join(sub, 'lib.js'), 'v2\n');
+  sh(['add', '-A'], sub);
+  sh(['commit', '-q', '-m', 'v2'], sub);
+
+  let ws = manifest.loadWorkspace(superRepo);
+  const rec = cs.create(ws, { title: 'my change', memberNames: ['member'] });
+  assertEqual(rec.members[0].branch, 'feature/x');
+  assertEqual(rec.members[0].merged, false);
+
+  sh(['push', '-q', 'origin', 'feature/x:main'], sub);
+  sh(['fetch', '-q', 'origin'], sub);
+
+  ws = manifest.loadWorkspace(superRepo);
+  const { cs: updated } = cs.refresh(ws, cs.read(superRepo, rec.id));
+  assertEqual(updated.members[0].merged, true, 'refresh should see the branch merged into main');
+});
+
+/* ------------------------------------------------------------------ */
+
+console.log('\nland — ordered bump + Gate 1 + commit');
+
+function makeSuperTwo(tmp) {
+  const a = makeRepo(path.join(tmp, 'a'), { initialFile: 'a.txt', content: 'a1\n' });
+  const b = makeRepo(path.join(tmp, 'b'), { initialFile: 'b.txt', content: 'b1\n' });
+  for (const r of [a, b]) sh(['config', 'receive.denyCurrentBranch', 'ignore'], r);
+
+  const superRepo = makeRepo(path.join(tmp, 'super'));
+  const au = a.replace(/\\/g, '/');
+  const bu = b.replace(/\\/g, '/');
+  sh(['-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', au, 'libs/a'], superRepo);
+  sh(['-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', bu, 'libs/b'], superRepo);
+  sh(['commit', '-q', '-m', 'add submodules'], superRepo);
+
+  manifest.write(superRepo, {
+    ...manifest.DEFAULT_MANIFEST,
+    superproject: { name: 'super', protectedBranches: ['main'] },
+    members: [
+      { name: 'a', path: 'libs/a', url: au, protectedBranch: 'main', remote: 'origin', dependsOn: [] },
+      { name: 'b', path: 'libs/b', url: bu, protectedBranch: 'main', remote: 'origin', dependsOn: ['a'] },
+    ],
+  });
+  return { a, b, superRepo, subA: path.join(superRepo, 'libs', 'a'), subB: path.join(superRepo, 'libs', 'b') };
+}
+
+atest('land bumps both pointers in one commit', async tmp => {
+  const land = require('../src/commands/land');
+  const { a, superRepo, subA, subB } = makeSuperTwo(tmp);
+  landOnMain(subA, 'a.txt', 'a2\n', 'a2');
+  landOnMain(subB, 'b.txt', 'b2\n', 'b2');
+
+  const before = sh(['rev-parse', 'HEAD'], superRepo);
+  const code = await land.run({ flags: {}, positional: [] }, { cwd: superRepo, json: true });
+  assertEqual(code, 0, 'land should succeed');
+
+  assertEqual(sh(['rev-list', '--count', `${before}..HEAD`], superRepo), '1', 'exactly one commit');
+  assert(sh(['log', '-1', '--format=%s'], superRepo).includes('poly land'), 'commit subject');
+
+  const links = g.gitlinksInTree(superRepo, 'HEAD');
+  assertEqual(links.find(l => l.path === 'libs/a').sha, sh(['rev-parse', 'main'], a),
+    'libs/a was not bumped to its protected-branch tip');
+});
+
+atest('land --dry-run changes nothing', async tmp => {
+  const land = require('../src/commands/land');
+  const { superRepo, subA } = makeSuperTwo(tmp);
+  landOnMain(subA, 'a.txt', 'a2\n', 'a2');
+
+  const superBefore = sh(['rev-parse', 'HEAD'], superRepo);
+  const subBefore = sh(['rev-parse', 'HEAD'], subA);
+  const code = await land.run({ flags: { 'dry-run': true }, positional: [] }, { cwd: superRepo, json: true });
+
+  assertEqual(code, 0);
+  assertEqual(sh(['rev-parse', 'HEAD'], superRepo), superBefore, 'superproject moved');
+  assertEqual(sh(['rev-parse', 'HEAD'], subA), subBefore, 'submodule checkout moved');
+  assert(!fs.existsSync(path.join(superRepo, '.poly', 'snapshots.json')), 'dry-run must not snapshot');
+});
+
+atest('land stops before committing when a pointer is not a forward move', async tmp => {
+  const land = require('../src/commands/land');
+  const { superRepo, subA } = makeSuperTwo(tmp);
+  // a commit that is ahead of origin/main — bumping to main would move backwards
+  fs.writeFileSync(path.join(subA, 'a.txt'), 'a2-local\n');
+  sh(['add', '-A'], subA);
+  sh(['commit', '-q', '-m', 'local only'], subA);
+  sh(['add', 'libs/a'], superRepo);
+
+  const before = sh(['rev-parse', 'HEAD'], superRepo);
+  const code = await land.run({ flags: {}, positional: [] }, { cwd: superRepo, json: true });
+
+  assertEqual(code, 1, 'land should refuse');
+  assertEqual(sh(['rev-parse', 'HEAD'], superRepo), before, 'no commit should have been made');
+});
+
+/* ------------------------------------------------------------------ */
+
+(async () => {
+  for (const { name, fn } of asyncTests) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'poly-test-'));
+    try {
+      await fn(dir);
+      passed++;
+      console.log(`  \x1b[32m✓\x1b[39m ${name}`);
+    } catch (err) {
+      failed++;
+      failures.push({ name, err });
+      console.log(`  \x1b[31m✗\x1b[39m ${name}`);
+      console.log(`      ${String(err && err.message).split('\n').join('\n      ')}`);
+    } finally {
+      try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 }); } catch { /* windows file locks */ }
+    }
+  }
+
+  console.log(`\n${passed} passed, ${failed} failed\n`);
+  if (failed) {
+    for (const f of failures) {
+      console.log(`\x1b[31m${f.name}\x1b[39m`);
+      console.log((f.err.stack || String(f.err)).split('\n').slice(0, 6).join('\n'));
+      console.log();
+    }
+  }
+  process.exit(failed ? 1 : 0);
+})();
