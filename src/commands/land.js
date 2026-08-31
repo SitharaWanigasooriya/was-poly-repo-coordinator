@@ -132,6 +132,8 @@ function commitMessage(bumps, record) {
 }
 
 async function run(args, ctx) {
+  if (args.flags.self) return runSelf(args, ctx);
+
   const ws = m.loadWorkspace(ctx.cwd, { requireManifest: true });
 
   // --- scope ---
@@ -353,10 +355,205 @@ async function run(args, ctx) {
   return 0;
 }
 
+/**
+ * poly land --self — fast-forward the superproject's OWN protected branch to the
+ * branch you are on. This is the sibling of the pointer-bump above: once the
+ * bump commit (or any superproject work) is on a feature branch and Gate 1 is
+ * green, this moves `main` up to it.
+ *
+ * Like everything else in poly it never rewrites history and never merges in a
+ * way that can conflict: the move must be a clean fast-forward or it refuses and
+ * tells you what to do. It does not switch your branch — you stay on the feature
+ * branch, which now has the same tip as the protected one — unless you pass
+ * --switch. It takes a safety snapshot first, though a fast-forward loses no
+ * commits: the old protected tip stays reachable from the new one.
+ */
+async function runSelf(args, ctx) {
+  const ws = m.loadWorkspace(ctx.cwd, { requireManifest: true });
+  const root = ws.root;
+  const dryRun = !!args.flags['dry-run'];
+  const force = !!args.flags.force;
+
+  if (g.isEmptyRepo(root)) {
+    console.error('The superproject has no commits yet — nothing to land.');
+    return 2;
+  }
+
+  const branch = g.currentBranch(root);
+  if (!branch) {
+    console.error('The superproject is on a detached HEAD. Check out the branch you want to land.');
+    return 2;
+  }
+
+  const protectedBranch = ws.manifest.defaults.protectedBranch;
+  const remote = ws.manifest.defaults.remote;
+
+  if (branch === protectedBranch) {
+    console.error(`Already on ${protectedBranch}. Check out the feature branch you want to land onto it.`);
+    return 2;
+  }
+
+  // Tracked changes would be left behind by the branch move (they belong to no
+  // commit yet), so refuse them — untracked files are harmless and ignored, the
+  // same line `land` itself draws.
+  const dirty = dirtyPaths(root);
+  if (dirty.length && !force) {
+    console.error(`The superproject has uncommitted changes to ${plural(dirty.length, 'tracked file')}:`);
+    for (const p of dirty.slice(0, 10)) console.error(`  ${p}`);
+    console.error('Commit or stash them first, or re-run with --force (the pre-land snapshot keeps a copy).');
+    return 2;
+  }
+
+  // --- safety net before anything moves ---
+  let snap = null;
+  if (!dryRun) {
+    try {
+      snap = safety.guard(ws, `before land --self ${branch} ${sym.arrow} ${protectedBranch}`);
+    } catch (err) {
+      console.error(err.message);
+      return 1;
+    }
+  }
+
+  g.tryGit(['fetch', remote, protectedBranch], { cwd: root, timeout: 180000 });
+
+  const head = g.headSha(root);
+  const localProtected = g.resolveRef(root, `refs/heads/${protectedBranch}`);
+  const remoteProtected = g.resolveRef(root, `refs/remotes/${remote}/${protectedBranch}`);
+
+  // --- Gate 1 on the commit that would become the protected-branch tip ---
+  const gate = policy.gate1(ws, { treeish: 'HEAD' });
+  const gateErrors = gate.findings.filter(f => f.severity === 'error');
+  if (gateErrors.length && !force) {
+    if (ctx.json) {
+      console.log(JSON.stringify({ snapshot: snap && snap.id, branch, protectedBranch, gate: gateErrors, landed: false }, null, 2));
+    } else {
+      console.log();
+      console.log(`  ${bad('Gate 1 rejected the current commit — not landing')}`);
+      for (const f of gateErrors) {
+        console.log(`  ${bad(f.title)} ${c.grey(`[${f.invariant}]`)}`);
+        console.log(indent(c.grey(f.detail), '      '));
+      }
+      console.log();
+      console.log(`  ${c.grey('fix the pointers, or re-run with --force to land anyway')}`);
+      console.log();
+    }
+    return 1;
+  }
+
+  if (localProtected === head) {
+    if (ctx.json) console.log(JSON.stringify({ branch, protectedBranch, landed: false, reason: 'nothing to land' }, null, 2));
+    else console.log(`\n  ${c.grey(`${protectedBranch} already points at ${branch} — nothing to land`)}\n`);
+    return 0;
+  }
+
+  // --- fast-forward safety: the move must lose nothing ---
+  const blockers = [];
+  if (localProtected && g.isAncestor(root, head, localProtected)) {
+    if (ctx.json) console.log(JSON.stringify({ branch, protectedBranch, landed: false, reason: 'behind' }, null, 2));
+    else console.log(`\n  ${c.grey(`${protectedBranch} is already ahead of ${branch} — nothing to land`)}\n`);
+    return 0;
+  }
+  if (localProtected && !g.isAncestor(root, localProtected, head)) {
+    blockers.push(`${branch} and ${protectedBranch} have diverged. Merge ${protectedBranch} into ${branch} yourself, then re-run.`);
+  }
+  if (remoteProtected && !g.isAncestor(root, remoteProtected, head)) {
+    blockers.push(`${remote}/${protectedBranch} has commits ${branch} does not. Run: poly sync --pull (on ${protectedBranch}), or merge it into ${branch}.`);
+  }
+
+  if (blockers.length) {
+    if (ctx.json) {
+      console.log(JSON.stringify({ snapshot: snap && snap.id, branch, protectedBranch, landed: false, blockers }, null, 2));
+    } else {
+      console.log();
+      console.log(`  ${bad('not a fast-forward — nothing was changed')}`);
+      for (const b of blockers) console.log(`  ${warn(b)}`);
+      if (snap) console.log(`  ${c.grey(`your work is in snapshot ${snap.id}`)}`);
+      console.log();
+    }
+    return 1;
+  }
+
+  const commitCount = Number(
+    (localProtected
+      ? g.tryGit(['rev-list', '--count', `${localProtected}..${head}`], { cwd: root })
+      : g.tryGit(['rev-list', '--count', head], { cwd: root })
+    ).out || 0
+  );
+
+  if (dryRun) {
+    if (ctx.json) {
+      console.log(JSON.stringify({
+        dryRun: true, branch, protectedBranch,
+        from: localProtected, to: head, commits: commitCount,
+        gate: gateErrors.length ? 'error' : 'pass', wouldLand: true,
+      }, null, 2));
+    } else {
+      console.log();
+      console.log(`  ${c.bold(branch)} ${sym.arrow} ${c.bold(protectedBranch)}   ${c.grey(`${localProtected ? localProtected.slice(0, 10) : '—'} ${sym.arrow} ${head.slice(0, 10)}`)}`);
+      console.log(`  ${ok(`${plural(commitCount, 'commit')} would fast-forward`)} ${c.grey('— re-run without --dry-run')}`);
+      console.log();
+    }
+    return 0;
+  }
+
+  // --- advance the protected branch ref: no checkout, no merge commit ---
+  const updateArgs = ['update-ref', '-m', `poly land --self: ${branch} -> ${protectedBranch}`, `refs/heads/${protectedBranch}`, head];
+  if (localProtected) updateArgs.push(localProtected); // atomic guard: fails if it moved under us
+  const upd = g.tryGit(updateArgs, { cwd: root });
+  if (!upd.ok) {
+    if (ctx.json) console.log(JSON.stringify({ snapshot: snap.id, branch, protectedBranch, landed: false, error: upd.err }, null, 2));
+    else {
+      console.log(`\n  ${bad(`could not move ${protectedBranch}: ${upd.err.split('\n')[0]}`)}`);
+      console.log(`  ${c.grey(`nothing was changed. snapshot ${snap.id}`)}\n`);
+    }
+    return 1;
+  }
+
+  let switched = false;
+  if (args.flags.switch) {
+    const co = g.tryGit(['checkout', protectedBranch], { cwd: root });
+    switched = co.ok;
+    if (!co.ok && !ctx.json) console.log(`  ${warn(`landed, but could not switch to ${protectedBranch}: ${co.err.split('\n')[0]}`)}`);
+  }
+
+  let pushed = false;
+  let pushError = null;
+  if (args.flags.push) {
+    const p = g.tryGit(['push', remote, `refs/heads/${protectedBranch}:refs/heads/${protectedBranch}`], { cwd: root, timeout: 180000 });
+    pushed = p.ok;
+    if (!p.ok) pushError = p.err.split('\n')[0];
+  }
+
+  if (ctx.json) {
+    console.log(JSON.stringify({
+      snapshot: snap.id, branch, protectedBranch,
+      from: localProtected, to: head, commits: commitCount,
+      switched, pushed, pushError, landed: true,
+    }, null, 2));
+    return pushError ? 1 : 0;
+  }
+
+  console.log();
+  console.log(`  ${ok(`landed ${c.bold(branch)} onto ${c.bold(protectedBranch)} — ${plural(commitCount, 'commit')} fast-forwarded`)}`);
+  console.log(`  ${c.grey(`${protectedBranch} ${sym.arrow} ${head.slice(0, 10)}`)}`);
+  console.log(`  ${c.grey(switched ? `switched to ${protectedBranch}` : `${branch} is unchanged and still checked out`)}`);
+  if (args.flags.push) {
+    console.log(pushed ? `  ${c.grey(`pushed to ${remote}/${protectedBranch}`)}` : `  ${bad(`push failed: ${pushError}`)}`);
+  } else {
+    console.log(`  ${c.grey('add')} ${c.bold('--push')} ${c.grey(`to publish ${protectedBranch} to ${remote}`)}`);
+  }
+  if (localProtected) {
+    console.log(`  ${c.grey(`undo:  git update-ref refs/heads/${protectedBranch} ${localProtected.slice(0, 12)}`)}${pushed ? c.grey(`  (${remote}/${protectedBranch} was fast-forwarded too)`) : ''}`);
+  }
+  console.log();
+  return pushError ? 1 : 0;
+}
+
 module.exports = {
   run,
   help: {
-    usage: 'poly land [--changeset <id>] [--dry-run] [--no-commit] [--pin] [--message <m>]',
+    usage: 'poly land [--changeset <id>] [--dry-run] [--no-commit] [--pin] [--message <m>]  |  poly land --self [--switch] [--push]',
     summary: 'Bump submodule pointers to what landed, in order, then commit if Gate 1 passes',
     detail: [
       'A pointer-bumper, not a merge tool: every member change must already be',
@@ -374,6 +571,18 @@ module.exports = {
       '  --pin             pin each landed commit (add --pin-push to publish)',
       '  --message <m>     override the generated commit message',
       '  --force           proceed even if the superproject has unrelated changes',
+      '',
+      'poly land --self  fast-forwards the superproject\'s OWN protected branch to',
+      'the branch you are on — the sibling of the pointer bump, for when the bump',
+      'commit (or any superproject work) is on a feature branch and ready to land.',
+      'It only ever fast-forwards: if main has moved it refuses and points you at',
+      '"poly sync --pull". It does not switch your branch unless you ask.',
+      '',
+      '  --self            land the superproject branch itself, not the pointers',
+      '  --switch          check out the protected branch afterwards',
+      '  --push            push the protected branch to its remote (never forced)',
+      '  --dry-run         show the fast-forward, move nothing',
+      '  --force           land even if Gate 1 has errors or the tree is dirty',
     ].join('\n'),
   },
 };

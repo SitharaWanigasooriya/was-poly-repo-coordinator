@@ -807,6 +807,70 @@ atest('land stops before committing when a pointer is not a forward move', async
   assertEqual(sh(['rev-parse', 'HEAD'], superRepo), before, 'no commit should have been made');
 });
 
+atest('land --self fast-forwards the superproject protected branch without switching', async tmp => {
+  const land = require('../src/commands/land');
+  const { superRepo, subA } = makeSuperTwo(tmp);
+  landOnMain(subA, 'a.txt', 'a2\n', 'a2');
+
+  sh(['checkout', '-q', '-b', 'feat/bump'], superRepo);
+  sh(['add', 'libs/a'], superRepo);
+  sh(['commit', '-q', '-m', 'bump libs/a'], superRepo);
+  const featTip = sh(['rev-parse', 'HEAD'], superRepo);
+
+  const code = await land.run({ flags: { self: true }, positional: [] }, { cwd: superRepo, json: true });
+  assertEqual(code, 0, 'land --self should succeed');
+  assertEqual(sh(['rev-parse', 'main'], superRepo), featTip, 'main was not fast-forwarded to the feature tip');
+  assertEqual(sh(['rev-parse', '--abbrev-ref', 'HEAD'], superRepo), 'feat/bump', 'must not switch branches by default');
+});
+
+atest('land --self --switch checks out the protected branch', async tmp => {
+  const land = require('../src/commands/land');
+  const { superRepo, subA } = makeSuperTwo(tmp);
+  landOnMain(subA, 'a.txt', 'a2\n', 'a2');
+  sh(['checkout', '-q', '-b', 'feat/bump'], superRepo);
+  sh(['add', 'libs/a'], superRepo);
+  sh(['commit', '-q', '-m', 'bump'], superRepo);
+
+  const code = await land.run({ flags: { self: true, switch: true }, positional: [] }, { cwd: superRepo, json: true });
+  assertEqual(code, 0);
+  assertEqual(sh(['rev-parse', '--abbrev-ref', 'HEAD'], superRepo), 'main', '--switch should end on the protected branch');
+});
+
+atest('land --self refuses a non-fast-forward and moves nothing', async tmp => {
+  const land = require('../src/commands/land');
+  const { superRepo, subA } = makeSuperTwo(tmp);
+  landOnMain(subA, 'a.txt', 'a2\n', 'a2');
+
+  sh(['checkout', '-q', '-b', 'feat/x'], superRepo);
+  sh(['add', 'libs/a'], superRepo);
+  sh(['commit', '-q', '-m', 'bump on feature'], superRepo);
+  sh(['checkout', '-q', 'main'], superRepo);
+  fs.writeFileSync(path.join(superRepo, 'notes.md'), 'main-only\n');
+  sh(['add', 'notes.md'], superRepo);
+  sh(['commit', '-q', '-m', 'main moves on'], superRepo);
+  sh(['checkout', '-q', 'feat/x'], superRepo);
+  const mainBefore = sh(['rev-parse', 'main'], superRepo);
+
+  const code = await land.run({ flags: { self: true }, positional: [] }, { cwd: superRepo, json: true });
+  assertEqual(code, 1, 'should refuse a non-fast-forward');
+  assertEqual(sh(['rev-parse', 'main'], superRepo), mainBefore, 'main must not have moved');
+});
+
+atest('land --self --dry-run moves no refs and takes no snapshot', async tmp => {
+  const land = require('../src/commands/land');
+  const { superRepo, subA } = makeSuperTwo(tmp);
+  landOnMain(subA, 'a.txt', 'a2\n', 'a2');
+  sh(['checkout', '-q', '-b', 'feat/bump'], superRepo);
+  sh(['add', 'libs/a'], superRepo);
+  sh(['commit', '-q', '-m', 'bump'], superRepo);
+  const mainBefore = sh(['rev-parse', 'main'], superRepo);
+
+  const code = await land.run({ flags: { self: true, 'dry-run': true }, positional: [] }, { cwd: superRepo, json: true });
+  assertEqual(code, 0);
+  assertEqual(sh(['rev-parse', 'main'], superRepo), mainBefore, 'dry-run moved main');
+  assert(!fs.existsSync(path.join(superRepo, '.poly', 'snapshots.json')), 'dry-run must not snapshot');
+});
+
 /* ------------------------------------------------------------------ */
 
 (async () => {

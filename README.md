@@ -303,6 +303,7 @@ poly check        # Gate 1: is every submodule pointer safely merged?
 | `poly changeset track [id]` | Recompute which members have merged into their protected branch. |
 | `poly pin [member...]` | Pin the commit each submodule points at (`refs/poly/pins/…`) so gc can never collect it. `--push` publishes. |
 | `poly land [--changeset id]` | Fast-forward submodules to what landed, in `dependsOn` order, run Gate 1, and commit the superproject only if it passes. Snapshots first. |
+| `poly land --self [--switch] [--push]` | Fast-forward the superproject's own protected branch to the branch you are on, once Gate 1 is green. Refuses anything that is not a clean fast-forward. |
 
 ### Workspace
 
@@ -440,6 +441,26 @@ touches PRs — the member changes must already be merged.
 The change set itself is optional (`poly land` with no `--changeset` bumps every
 pointer that has a forward move available); it just records intent and is marked
 `landed` once the superproject commit is made.
+
+### Landing the superproject branch itself
+
+`poly land` bumps pointers; it does not move the superproject's own branch. Once
+the bump commit (or any superproject work) is on a feature branch and Gate 1 is
+green, `poly land --self` fast-forwards the protected branch to it:
+
+```sh
+poly run git checkout -b bump/tax-rounding   # branch the superproject
+poly land --changeset <id>                   # bump pointers, commit on the branch
+poly land --self --dry-run                   # show the fast-forward
+poly land --self --push                      # move main up to it and publish
+```
+
+It **only ever fast-forwards**. If `main` has moved on, it refuses and points you
+at `poly sync --pull` (or a manual merge of `main` into your branch) — poly never
+rebases and never makes a merge that can conflict. It does not switch your branch
+unless you pass `--switch`, and it snapshots first, though a fast-forward loses no
+commits: the old tip stays reachable from the new one. Undo is a one-liner it
+prints (`git update-ref refs/heads/main <old-sha>`).
 
 ## The manifest
 
