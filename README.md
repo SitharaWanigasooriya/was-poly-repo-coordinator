@@ -295,6 +295,17 @@ poly check        # Gate 1: is every submodule pointer safely merged?
 | `poly restore <id>` | Create a branch at the snapshot. Changes nothing else. |
 | `poly restore <id> --apply` | Write the files back. Snapshots current state first, so it is undoable. Never deletes files. |
 
+### Landing a change
+
+| Command | What it does |
+|---|---|
+| `poly changeset new "why" [member...]` | Open a change set: which members carry a change, on which branch, from which pointer. Local only. |
+| `poly changeset track [id]` | Recompute which members have merged into their protected branch. |
+| `poly pin [member...]` | Pin the commit each submodule points at (`refs/poly/pins/…`) so gc can never collect it. `--push` publishes. |
+| `poly land [--changeset id]` | Fast-forward submodules to what landed, in `dependsOn` order, run Gate 1, and commit the superproject only if it passes. Snapshots first. |
+| `poly land --self [--switch] [--push] [--changeset id]` | Fast-forward the superproject's own protected branch to the branch you are on, once Gate 1 is green. Refuses anything that is not a clean fast-forward. `poly status` flags when a branch is ready for this. |
+| `poly land --self --undo` | Walk the protected branch back to where the last `--self` land found it. Non-destructive; never force-pushes. |
+
 ### Workspace
 
 | Command | What it does |
@@ -304,7 +315,7 @@ poly check        # Gate 1: is every submodule pointer safely merged?
 | `poly init` | Write `poly.json` from `.gitmodules`. |
 
 Aliases: `st`/`s` → status, `dr` → doctor, `snap` → save, `ls`/`list` → snapshots,
-`undo` → restore, `foreach`/`each` → run.
+`undo` → restore, `foreach`/`each` → run, `cs` → changeset.
 
 Global: `-C <dir>` run as if from another directory, `--json` machine-readable
 output, `POLY_ASCII=1` plain symbols, `NO_COLOR=1` no colour.
@@ -379,6 +390,94 @@ poly check --head --strict     # in CI: exit 1 on any broken pointer
 `--strict` is what turns Phase 1 reporting into Phase 3 enforcement. Without it
 the gate reports and exits 0, which is the intended way to adopt it.
 
+### `--online` — review integrity (I3)
+
+`poly check --online` (and `poly doctor --online`) adds the one check pure git
+cannot do: for every pointer, did that commit reach the protected branch through
+a *merged, approved* GitHub pull request — or did someone push straight to it?
+
+It uses the `gh` CLI when it is installed and logged in, otherwise a token from
+`GH_TOKEN` / `GITHUB_TOKEN`. Members whose URL is not on github.com, and anything
+it cannot reach, are reported as *not checked* rather than assumed good. It stays
+reporting-only until you set `"requireReviewedPointers": true` in `poly.json`.
+
+### Making a pointer durable — `poly pin`
+
+Reachable from `main` is not the same as durable: the branch can be reset and
+history can be rewritten. `poly pin` writes `refs/poly/pins/<member>/<shortsha>`
+in each member repo, which keeps the exact pinned commit reachable forever.
+
+```sh
+poly pin                 # pin every current pointer, locally
+poly pin api --push      # pin one member and publish the ref to its remote
+```
+
+Turn on enforcement with `"requirePins": true` — then `poly check` fails on any
+pointer without a pin. Nothing in poly ever deletes a pin.
+
+## Landing a change set
+
+Once each member PR has merged into its protected branch, `poly land` moves the
+superproject pointers to match — in `dependsOn` order, so a build at any
+intermediate commit still resolves.
+
+```sh
+poly changeset new "checkout: tax rounding" pos-ms-pricing-tax-service pos-ms-order-service
+poly changeset track            # once the member PRs merge, this flips them to “merged”
+poly land --changeset <id> --dry-run
+poly land --changeset <id> --pin
+```
+
+For each member in order, `land` fetches the protected branch, checks the move is
+a real fast-forward (the same predicates Gate 1 uses), fast-forwards the submodule
+checkout, and stages the gitlink. Then it runs Gate 1 against the staged state and
+**commits only if nothing is at error severity** — otherwise it stops with the
+bumps staged and a pre-land snapshot to fall back to.
+
+It takes a safety snapshot first. There is no `--keep-going`: a half-landed change
+set is exactly the state the snapshot exists to make survivable, so it stops on
+the first blocker. `land` never runs `git merge` on a member work branch and never
+touches PRs — the member changes must already be merged.
+
+The change set itself is optional (`poly land` with no `--changeset` bumps every
+pointer that has a forward move available); it just records intent and is marked
+`landed` once the superproject commit is made.
+
+### Landing the superproject branch itself
+
+`poly land` bumps pointers; it does not move the superproject's own branch. Once
+the bump commit (or any superproject work) is on a feature branch and Gate 1 is
+green, `poly land --self` fast-forwards the protected branch to it:
+
+```sh
+git checkout -b bump/tax-rounding      # a branch in the superproject
+poly land --changeset <id>             # bump pointers, commit on that branch
+poly land --self --dry-run             # show the fast-forward
+poly land --self --changeset <id> --push   # move main up to it, mark the set landed, publish
+```
+
+`poly status` points this out for you: on a feature branch that is a clean
+fast-forward ahead of `main`, it prints *"bump/tax-rounding is 3 commits ahead of
+main — `poly land --self` fast-forwards it"*.
+
+It **only ever fast-forwards**. If `main` has moved on, it refuses and points you
+at `poly sync --pull` (or a manual merge of `main` into your branch) — poly never
+rebases and never makes a merge that can conflict. The move is a single ref
+update: no checkout unless you pass `--switch`, no merge commit. With
+`--changeset <id>` it also refuses unless that change set has fully merged, and
+marks it `landed` once the branch moves. A safety snapshot is taken first, and
+the before/after positions are saved under `refs/poly/land/main/`, so:
+
+```sh
+poly land --self --undo       # walk main back to where the last --self found it
+```
+
+Undo is non-destructive — the un-landed commits stay on the branch you landed
+from — and refuses if anything landed on `main` since. It never force-pushes, so
+a `--self --push` that has already reached the remote must be walked back there
+by hand. Gate 1 enforcement can be skipped with `--no-verify`; a dirty tracked
+tree or an unmerged change set with `--force`.
+
 ## The manifest
 
 `poly init` writes `poly.json`:
@@ -432,14 +531,21 @@ Phase 5 is the largest cost and should wait until the gates are boring and trust
 | Phase | Status |
 |---|---|
 | 1 — Visibility: manifest, status, doctor, Gate 1 reporting | **built** |
-| 2 — Ergonomics: fan-out, workspace sync, ChangeSet create/track | `sync` and `run` built; ChangeSet commands not yet |
-| 3 — Enforcement: Gate 1 required, pinning, guardrails as code | `--strict` built; `poly pin` not yet |
+| 2 — Ergonomics: fan-out, workspace sync, ChangeSet create/track | **built** — `sync`, `run`, `poly changeset` |
+| 3 — Enforcement: Gate 1 required, pinning, guardrails as code | **built** — `--strict`, `poly pin`, `poly check --online` (I3) |
 | 4 — Integration: integration-build, independent-safety | not started |
-| 5 — Coordination: saga coordinator, locks, queue, compensation | not started |
+| 5 — Coordination: saga coordinator, locks, queue, compensation | `poly land` bumps pointers in dependency order (no saga/locks) |
 | 6 — Evidence: lockfiles, releases, coupling reports | not started |
 
-Checks that need a platform API (GitHub/GitLab) are reported as *not checked*
-rather than silently assumed — invariant I3 (review integrity) is the main one.
+`poly land` is a deliberate slice of Phase 5: the ordered pointer bump with a
+Gate-1 stop, but no coordinator, no locks and no queue. It does not promise
+atomicity — a partially-landed change set is still a real state, made visible and
+survivable rather than pretended away.
+
+Checks that need a platform API are opt-in: `poly check --online` runs I3
+(review integrity) against GitHub, and anything it cannot reach — a non-github
+remote, a missing token — is reported as *not checked* rather than assumed.
+GitLab is not implemented.
 
 **This tool does not promise atomicity**, and never will. A partially-landed
 change set is a real state; the goal is to make that window survivable and

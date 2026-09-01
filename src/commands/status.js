@@ -42,12 +42,28 @@ function branchLabel(repoPath) {
   return branch + suffix;
 }
 
+/**
+ * Is the superproject on a feature branch that would fast-forward cleanly onto
+ * its protected branch? If so, `poly land --self` is the next move. Read-only.
+ */
+function selfLandHint(ws) {
+  const pb = ws.manifest.defaults.protectedBranch;
+  const branch = g.currentBranch(ws.root);
+  if (!branch || branch === pb || g.isEmptyRepo(ws.root)) return null;
+  const lp = g.resolveRef(ws.root, `refs/heads/${pb}`);
+  const head = g.headSha(ws.root);
+  if (!lp || lp === head || !g.isAncestor(ws.root, lp, head)) return null;
+  const ahead = Number(g.tryGit(['rev-list', '--count', `${lp}..${head}`], { cwd: ws.root }).out || 0);
+  return { branch, protectedBranch: pb, ahead };
+}
+
 function run(args, ctx) {
   const ws = m.loadWorkspace(ctx.cwd);
   const result = policy.checkAll(ws, { treeish: 'INDEX' });
   const counts = policy.summarise(result.findings);
   const snapshots = safety.listSnapshots(ws);
   const rootState = g.worktreeState(ws.root);
+  const selfLand = selfLandHint(ws);
 
   if (ctx.json) {
     console.log(JSON.stringify({
@@ -59,6 +75,7 @@ function run(args, ctx) {
         detached: g.isDetached(ws.root),
         head: g.headSha(ws.root),
         worktree: rootState,
+        readyToLandSelf: selfLand ? { protectedBranch: selfLand.protectedBranch, ahead: selfLand.ahead } : null,
       },
       members: ws.members.map(mem => {
         const row = result.rows.find(r => r.path === mem.path);
@@ -155,8 +172,18 @@ function run(args, ctx) {
     console.log(`    ${c.grey(`${dirty} repo(s) have uncommitted work —`)} ${c.bold('poly save')} ${c.grey('makes it restorable')}`);
   }
 
+  // row.pinned is already computed by gate1 (checkAll) — no extra git calls here.
+  const pinnable = result.rows.filter(r => r.pinned !== undefined);
+  const pinned = pinnable.filter(r => r.pinned).length;
+  if (pinnable.length && pinned < pinnable.length) {
+    console.log(`    ${c.grey(`${pinned}/${pinnable.length} pointers pinned —`)} ${c.bold('poly pin')} ${c.grey('makes them durable')}`);
+  }
+
   if (errors.length || warnings.length) {
     console.log(`    ${c.grey('run')} ${c.bold('poly doctor')} ${c.grey('for detail and suggested fixes')}`);
+  }
+  if (selfLand && !errors.length) {
+    console.log(`    ${c.grey(`${selfLand.branch} is ${plural(selfLand.ahead, 'commit')} ahead of ${selfLand.protectedBranch} —`)} ${c.bold('poly land --self')} ${c.grey('fast-forwards it')}`);
   }
   console.log();
 

@@ -11,6 +11,7 @@
 
 const path = require('path');
 const g = require('./git');
+const github = require('./github');
 
 const SEVERITY = { error: 3, warn: 2, info: 1 };
 
@@ -210,7 +211,7 @@ function gate1(workspace, { treeish = 'INDEX', includeHeadComparison = true } = 
         detail:
           `Reachability from ${member.protectedBranch} is not durability — the branch can be reset ` +
           `and history can be rewritten. A pin keeps the commit permanently reachable.`,
-        fix: `poly pin ${member.name}   (available from Phase 3)`,
+        fix: `poly pin ${member.name}`,
       }));
     }
 
@@ -219,7 +220,7 @@ function gate1(workspace, { treeish = 'INDEX', includeHeadComparison = true } = 
 
   // --- Check 5: member PR merge state (I3) ---
   // Requires a platform provider (GitHub/GitLab API). Phase 5.
-  const notChecked = ['I3 review integrity (needs platform API — Phase 5)'];
+  const notChecked = ['I3 review integrity — run: poly check --online'];
 
   return { findings, rows, notChecked, treeish };
 }
@@ -362,6 +363,106 @@ function checkWorkspace(workspace) {
   return findings;
 }
 
+/**
+ * I3 — review integrity. The one check that needs a platform API.
+ *
+ * Takes a gate1() result and, for every member whose URL is a github.com repo,
+ * asks whether the pointed-at commit reached the protected branch through a
+ * merged pull request — and whether that PR was approved.
+ *
+ * Mutates `result` in place (adds `row.review`, appends findings, rewrites
+ * `result.notChecked`) and returns it. Never throws: anything it cannot reach
+ * is reported as "not checked", exactly as before it ran.
+ *
+ * `opts.auth` / `opts.transport` are injectable for tests.
+ */
+async function augmentWithReviews(result, workspace, opts = {}) {
+  const auth = opts.auth || github.detectAuth();
+  const policy = workspace.manifest.policy || {};
+  const byPath = new Map(workspace.members.map(m => [m.path, m]));
+
+  const notGithub = [];
+  let checkedAny = false;
+  let authFailed = false;
+
+  for (const row of result.rows) {
+    if (!row.pointer || row.status === 'missing' || row.status === 'broken') continue;
+    const member = byPath.get(row.path);
+    if (!member) continue;
+
+    const gh = github.parseGithubRepo(member.url);
+    if (!gh) {
+      notGithub.push(member.name);
+      continue;
+    }
+
+    if (auth.mode === 'none') { authFailed = true; continue; }
+
+    const state = await github.commitReviewState(
+      { owner: gh.owner, repo: gh.repo, sha: row.pointer, baseRef: member.protectedBranch },
+      auth,
+      opts.transport
+    );
+
+    row.review = state;
+    if (!state.checked) { authFailed = true; continue; }
+    checkedAny = true;
+
+    if (!state.merged) {
+      row.notes.push('no merged PR');
+      result.findings.push(finding({
+        severity: policy.requireReviewedPointers === false ? 'warn' : 'error',
+        invariant: 'I3',
+        member: member.name,
+        title: `${member.name}: pointer did not reach ${member.protectedBranch} through a merged PR`,
+        detail:
+          `${member.path} points at ${row.pointer.slice(0, 10)}. GitHub has no merged pull ` +
+          `request into ${member.protectedBranch} that contains it` +
+          (state.hasOpenPr ? ' — there is an open PR, but it has not merged yet.' : '.') +
+          `\nEither it was pushed straight to the branch, or the PR that carried it targeted a different base.`,
+        fix: `Land the change through a reviewed PR into ${member.protectedBranch}, then re-bump the pointer.`,
+      }));
+    } else if (state.reviewDecision === 'changes_requested') {
+      row.notes.push(`PR #${state.prNumber}: changes requested`);
+      result.findings.push(finding({
+        severity: 'warn',
+        invariant: 'I3',
+        member: member.name,
+        title: `${member.name}: merged PR #${state.prNumber} had changes requested and no later approval`,
+        detail: `The commit is on ${member.protectedBranch}, but the review it merged with was not resolved to an approval.`,
+        fix: `Confirm the review concern was addressed; nothing to change in the pointer itself.`,
+      }));
+    } else if (state.reviewDecision === 'no_review') {
+      row.notes.push(`PR #${state.prNumber}: no review`);
+      result.findings.push(finding({
+        severity: 'warn',
+        invariant: 'I3',
+        member: member.name,
+        title: `${member.name}: merged PR #${state.prNumber} had no approving review`,
+        detail: `The commit reached ${member.protectedBranch} via a PR, but nobody approved it.`,
+        fix: `Decide whether an unreviewed merge is acceptable for this member; consider a branch protection rule.`,
+      }));
+    } else {
+      row.notes.push(`PR #${state.prNumber} approved`);
+    }
+  }
+
+  result.findings.sort((a, b) => SEVERITY[b.severity] - SEVERITY[a.severity]);
+
+  // Rewrite the "not checked" line now that we have actually tried.
+  result.notChecked = result.notChecked.filter(n => !n.startsWith('I3 '));
+  if (!checkedAny && authFailed) {
+    result.notChecked.push(`I3 review integrity — ${auth.reason || 'GitHub was unreachable'}`);
+  } else if (authFailed) {
+    result.notChecked.push('I3 review integrity — some members could not be reached on GitHub');
+  }
+  if (notGithub.length) {
+    result.notChecked.push(`I3 review integrity — not a github.com repo: ${notGithub.join(', ')}`);
+  }
+
+  return result;
+}
+
 /** Everything, in one pass. */
 function checkAll(workspace, opts = {}) {
   const gate = gate1(workspace, opts);
@@ -382,4 +483,4 @@ function summarise(findings) {
   };
 }
 
-module.exports = { gate1, checkManifestCoherence, checkWorkspace, checkAll, summarise, resolveProtectedRef, SEVERITY };
+module.exports = { gate1, augmentWithReviews, checkManifestCoherence, checkWorkspace, checkAll, summarise, resolveProtectedRef, SEVERITY };

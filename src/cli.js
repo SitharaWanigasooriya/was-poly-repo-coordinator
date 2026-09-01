@@ -15,6 +15,9 @@ const COMMANDS = {
   sync: require('./commands/sync'),
   run: require('./commands/run'),
   init: require('./commands/init'),
+  changeset: require('./commands/changeset'),
+  pin: require('./commands/pin'),
+  land: require('./commands/land'),
 };
 
 // Presentation order for help: the everyday ones first.
@@ -26,6 +29,10 @@ const GROUPS = [
   {
     title: 'Your safety net',
     commands: ['save', 'snapshots', 'restore'],
+  },
+  {
+    title: 'Landing changes',
+    commands: ['changeset', 'pin', 'land'],
   },
   {
     title: 'Workspace',
@@ -42,6 +49,18 @@ for (const [name, cmd] of Object.entries(COMMANDS)) {
 // the rest of the line belongs to it: poly must not claim its flags. Keyed by
 // canonical name, so aliases resolve here too.
 const VERBATIM_TAIL = new Set(['run']);
+
+// Flags that take a value: `--flag value` as well as `--flag=value`.
+// A flag given more than once accumulates into an array.
+const VALUE_FLAGS = new Set(['branch', 'label', 'C', 'changeset', 'message', 'title', 'member', 'remote']);
+
+function setFlag(flags, key, value) {
+  if (key in flags && flags[key] !== true && flags[key] !== false) {
+    flags[key] = [].concat(flags[key], value);
+  } else {
+    flags[key] = value;
+  }
+}
 
 /**
  * Minimal parser: --flag, --flag=value, --no-flag, -abc, then positionals.
@@ -67,15 +86,15 @@ function parseArgs(argv) {
       const body = arg.slice(2);
       const eq = body.indexOf('=');
       if (eq !== -1) {
-        flags[body.slice(0, eq)] = body.slice(eq + 1);
+        setFlag(flags, body.slice(0, eq), body.slice(eq + 1));
       } else if (body.startsWith('no-')) {
         flags[body] = true;
         flags[body.slice(3)] = false;
       } else {
         // Consume a value for flags that take one.
         const next = argv[i + 1];
-        if (['branch', 'label', 'C'].includes(body) && next && !next.startsWith('-')) {
-          flags[body] = next;
+        if (VALUE_FLAGS.has(body) && next !== undefined && !next.startsWith('-')) {
+          setFlag(flags, body, next);
           i++;
         } else {
           flags[body] = true;
@@ -162,7 +181,7 @@ function printHelp(commandName) {
   return 0;
 }
 
-function main(argv) {
+async function main(argv) {
   const args = parseArgs(argv);
 
   if (args.flags.version || args.flags.V) {
@@ -197,7 +216,7 @@ function main(argv) {
   };
 
   try {
-    return command.run(args, ctx) || 0;
+    return (await command.run(args, ctx)) || 0;
   } catch (err) {
     if (err instanceof DestructiveCommandError) {
       // Should be unreachable: it means the tool tried to destroy something.

@@ -13,10 +13,17 @@ const m = require('../manifest');
 const policy = require('../policy');
 const { c, sym, ok, bad, warn, info, table, heading, plural, indent } = require('../ui');
 
-function run(args, ctx) {
+async function run(args, ctx) {
   const ws = m.loadWorkspace(ctx.cwd);
   const treeish = args.flags.head ? 'HEAD' : 'INDEX';
   const result = policy.gate1(ws, { treeish });
+
+  // --online adds I3 (review integrity): did each pointer reach its protected
+  // branch through a merged, approved PR? Needs the gh CLI or a token.
+  const online = args.flags.online || process.env.POLY_ONLINE === '1';
+  if (online) {
+    await policy.augmentWithReviews(result, ws);
+  }
 
   // In Phase 1 the gate reports rather than blocks unless --strict is passed.
   const strict = args.flags.strict || process.env.POLY_STRICT === '1';
@@ -31,6 +38,7 @@ function run(args, ctx) {
       gate: 'pointer-integrity',
       treeish,
       strict,
+      online,
       pass: counts.errors === 0,
       counts,
       rows: result.rows,
@@ -107,7 +115,7 @@ function run(args, ctx) {
 module.exports = {
   run,
   help: {
-    usage: 'poly check [--head] [--strict] [--json]',
+    usage: 'poly check [--head] [--strict] [--online] [--json]',
     summary: 'Gate 1: is every submodule pointer safely merged? (CI-friendly)',
     detail: [
       'Pure Git reachability — no trust in CI or review state is required.',
@@ -115,6 +123,9 @@ module.exports = {
       '',
       '  --head     check the last commit instead of the staged state',
       '  --strict   exit 1 on problems (Phase 3 enforcement). Default reports only.',
+      '  --online   also run I3 (review integrity): confirm each pointer reached',
+      '             its protected branch through a merged, approved GitHub PR.',
+      '             Uses the gh CLI if present, else GH_TOKEN / GITHUB_TOKEN.',
       '  --json     machine-readable output for CI',
       '',
       'In CI:  poly check --head --strict',
