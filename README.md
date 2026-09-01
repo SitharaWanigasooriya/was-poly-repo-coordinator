@@ -303,7 +303,8 @@ poly check        # Gate 1: is every submodule pointer safely merged?
 | `poly changeset track [id]` | Recompute which members have merged into their protected branch. |
 | `poly pin [member...]` | Pin the commit each submodule points at (`refs/poly/pins/…`) so gc can never collect it. `--push` publishes. |
 | `poly land [--changeset id]` | Fast-forward submodules to what landed, in `dependsOn` order, run Gate 1, and commit the superproject only if it passes. Snapshots first. |
-| `poly land --self [--switch] [--push]` | Fast-forward the superproject's own protected branch to the branch you are on, once Gate 1 is green. Refuses anything that is not a clean fast-forward. |
+| `poly land --self [--switch] [--push] [--changeset id]` | Fast-forward the superproject's own protected branch to the branch you are on, once Gate 1 is green. Refuses anything that is not a clean fast-forward. `poly status` flags when a branch is ready for this. |
+| `poly land --self --undo` | Walk the protected branch back to where the last `--self` land found it. Non-destructive; never force-pushes. |
 
 ### Workspace
 
@@ -449,18 +450,33 @@ the bump commit (or any superproject work) is on a feature branch and Gate 1 is
 green, `poly land --self` fast-forwards the protected branch to it:
 
 ```sh
-poly run git checkout -b bump/tax-rounding   # branch the superproject
-poly land --changeset <id>                   # bump pointers, commit on the branch
-poly land --self --dry-run                   # show the fast-forward
-poly land --self --push                      # move main up to it and publish
+git checkout -b bump/tax-rounding      # a branch in the superproject
+poly land --changeset <id>             # bump pointers, commit on that branch
+poly land --self --dry-run             # show the fast-forward
+poly land --self --changeset <id> --push   # move main up to it, mark the set landed, publish
 ```
+
+`poly status` points this out for you: on a feature branch that is a clean
+fast-forward ahead of `main`, it prints *"bump/tax-rounding is 3 commits ahead of
+main — `poly land --self` fast-forwards it"*.
 
 It **only ever fast-forwards**. If `main` has moved on, it refuses and points you
 at `poly sync --pull` (or a manual merge of `main` into your branch) — poly never
-rebases and never makes a merge that can conflict. It does not switch your branch
-unless you pass `--switch`, and it snapshots first, though a fast-forward loses no
-commits: the old tip stays reachable from the new one. Undo is a one-liner it
-prints (`git update-ref refs/heads/main <old-sha>`).
+rebases and never makes a merge that can conflict. The move is a single ref
+update: no checkout unless you pass `--switch`, no merge commit. With
+`--changeset <id>` it also refuses unless that change set has fully merged, and
+marks it `landed` once the branch moves. A safety snapshot is taken first, and
+the before/after positions are saved under `refs/poly/land/main/`, so:
+
+```sh
+poly land --self --undo       # walk main back to where the last --self found it
+```
+
+Undo is non-destructive — the un-landed commits stay on the branch you landed
+from — and refuses if anything landed on `main` since. It never force-pushes, so
+a `--self --push` that has already reached the remote must be walked back there
+by hand. Gate 1 enforcement can be skipped with `--no-verify`; a dirty tracked
+tree or an unmerged change set with `--force`.
 
 ## The manifest
 

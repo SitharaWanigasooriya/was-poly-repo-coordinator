@@ -871,6 +871,191 @@ atest('land --self --dry-run moves no refs and takes no snapshot', async tmp => 
   assert(!fs.existsSync(path.join(superRepo, '.poly', 'snapshots.json')), 'dry-run must not snapshot');
 });
 
+// A superproject feature branch with one commit that lands cleanly onto main.
+function superOnFeature(tmp, branch = 'feat/bump') {
+  const { superRepo, subA, subB } = makeSuperTwo(tmp);
+  landOnMain(subA, 'a.txt', 'a2\n', 'a2');
+  sh(['checkout', '-q', '-b', branch], superRepo);
+  sh(['add', 'libs/a'], superRepo);
+  sh(['commit', '-q', '-m', 'bump libs/a'], superRepo);
+  return { superRepo, subA, subB, tip: sh(['rev-parse', 'HEAD'], superRepo) };
+}
+
+atest('land --self records the undo ref and --undo walks main back non-destructively', async tmp => {
+  const land = require('../src/commands/land');
+  const { superRepo, tip } = superOnFeature(tmp);
+  const mainBefore = sh(['rev-parse', 'main'], superRepo);
+
+  let code = await land.run({ flags: { self: true }, positional: [] }, { cwd: superRepo, json: true });
+  assertEqual(code, 0, 'land --self should succeed');
+  assertEqual(sh(['rev-parse', 'main'], superRepo), tip, 'main should have landed');
+  assertEqual(sh(['rev-parse', 'refs/poly/land/main/from'], superRepo), mainBefore, 'undo anchor /from not recorded');
+  assertEqual(sh(['rev-parse', 'refs/poly/land/main/onto'], superRepo), tip, 'undo anchor /onto not recorded');
+
+  code = await land.run({ flags: { self: true, undo: true }, positional: [] }, { cwd: superRepo, json: true });
+  assertEqual(code, 0, 'undo should succeed');
+  assertEqual(sh(['rev-parse', 'main'], superRepo), mainBefore, 'undo did not move main back');
+  assert(g.commitExists(superRepo, tip), 'the un-landed commit must stay reachable');
+
+  // A second undo is a no-op, not an error.
+  code = await land.run({ flags: { self: true, undo: true }, positional: [] }, { cwd: superRepo, json: true });
+  assertEqual(code, 0, 'a redundant undo should be a no-op');
+});
+
+atest('land --self --undo refuses once main has moved on', async tmp => {
+  const land = require('../src/commands/land');
+  const { superRepo } = superOnFeature(tmp);
+  await land.run({ flags: { self: true, switch: true }, positional: [] }, { cwd: superRepo, json: true });
+
+  // main advances again, past the recorded undo point
+  fs.writeFileSync(path.join(superRepo, 'later.md'), 'more\n');
+  sh(['add', 'later.md'], superRepo);
+  sh(['commit', '-q', '-m', 'later work on main'], superRepo);
+  const mainNow = sh(['rev-parse', 'main'], superRepo);
+
+  const code = await land.run({ flags: { self: true, undo: true }, positional: [] }, { cwd: superRepo, json: true });
+  assertEqual(code, 1, 'undo should refuse after main moved on');
+  assertEqual(sh(['rev-parse', 'main'], superRepo), mainNow, 'main must not have moved');
+});
+
+atest('land --self --undo refuses while the protected branch is checked out', async tmp => {
+  const land = require('../src/commands/land');
+  const { superRepo, tip } = superOnFeature(tmp);
+  await land.run({ flags: { self: true, switch: true }, positional: [] }, { cwd: superRepo, json: true });
+  // still on main after --switch
+  const code = await land.run({ flags: { self: true, undo: true }, positional: [] }, { cwd: superRepo, json: true });
+  assertEqual(code, 2, 'undo must refuse while sitting on the protected branch');
+  assertEqual(sh(['rev-parse', 'main'], superRepo), tip, 'main must be untouched');
+});
+
+atest('land --self refuses on a Gate 1 error, and --no-verify overrides it', async tmp => {
+  const land = require('../src/commands/land');
+  const { superRepo, subA } = makeSuperTwo(tmp);
+  // a commit only in the submodule checkout — never lands on origin/main
+  fs.writeFileSync(path.join(subA, 'a.txt'), 'a2-unmerged\n');
+  sh(['add', '-A'], subA);
+  sh(['commit', '-q', '-m', 'unmerged'], subA);
+  sh(['checkout', '-q', '-b', 'feat/bump'], superRepo);
+  sh(['add', 'libs/a'], superRepo);
+  sh(['commit', '-q', '-m', 'bump to unmerged pointer'], superRepo);
+  const mainBefore = sh(['rev-parse', 'main'], superRepo);
+
+  let code = await land.run({ flags: { self: true }, positional: [] }, { cwd: superRepo, json: true });
+  assertEqual(code, 1, 'a Gate 1 error should block the land');
+  assertEqual(sh(['rev-parse', 'main'], superRepo), mainBefore, 'main moved despite a Gate 1 error');
+
+  code = await land.run({ flags: { self: true, 'no-verify': true }, positional: [] }, { cwd: superRepo, json: true });
+  assertEqual(code, 0, '--no-verify should let it through');
+  assertEqual(sh(['rev-parse', 'main'], superRepo), sh(['rev-parse', 'feat/bump'], superRepo), '--no-verify did not land');
+});
+
+atest('land --self refuses a dirty tracked tree, and --force overrides it', async tmp => {
+  const land = require('../src/commands/land');
+  const { superRepo, tip } = superOnFeature(tmp);
+  fs.writeFileSync(path.join(superRepo, '.gitmodules'),
+    sh(['show', 'HEAD:.gitmodules'], superRepo) + '\n# touched\n');
+  const mainBefore = sh(['rev-parse', 'main'], superRepo);
+
+  let code = await land.run({ flags: { self: true }, positional: [] }, { cwd: superRepo, json: true });
+  assertEqual(code, 2, 'a dirty tracked file should block');
+  assertEqual(sh(['rev-parse', 'main'], superRepo), mainBefore, 'main moved despite a dirty tree');
+
+  code = await land.run({ flags: { self: true, force: true }, positional: [] }, { cwd: superRepo, json: true });
+  assertEqual(code, 0, '--force should override the dirty-tree check');
+  assertEqual(sh(['rev-parse', 'main'], superRepo), tip, '--force did not land');
+});
+
+atest('land --self --push publishes the protected branch to its remote', async tmp => {
+  const land = require('../src/commands/land');
+  const bare = path.join(tmp, 'super-origin.git');
+  sh(['init', '-q', '--bare', bare], tmp);
+  const { superRepo, tip } = superOnFeature(tmp);
+  sh(['remote', 'add', 'origin', bare.replace(/\\/g, '/')], superRepo);
+  sh(['push', '-q', 'origin', 'main'], superRepo);
+
+  const code = await land.run({ flags: { self: true, push: true }, positional: [] }, { cwd: superRepo, json: true });
+  assertEqual(code, 0, 'land --self --push should succeed');
+  assertEqual(sh(['rev-parse', 'main'], bare), tip, 'the bare origin main was not fast-forwarded');
+});
+
+atest('land --self is refused on a detached HEAD and when already on the protected branch', async tmp => {
+  const land = require('../src/commands/land');
+  const { superRepo } = makeSuperTwo(tmp);
+
+  const onMain = await land.run({ flags: { self: true }, positional: [] }, { cwd: superRepo, json: true });
+  assertEqual(onMain, 2, 'being on the protected branch should be refused');
+
+  sh(['checkout', '-q', '--detach', 'HEAD'], superRepo);
+  const detached = await land.run({ flags: { self: true }, positional: [] }, { cwd: superRepo, json: true });
+  assertEqual(detached, 2, 'a detached HEAD should be refused');
+});
+
+atest('land --self reports nothing to land when the branch has no new commits', async tmp => {
+  const land = require('../src/commands/land');
+  const { superRepo } = makeSuperTwo(tmp);
+  sh(['checkout', '-q', '-b', 'feat/empty'], superRepo); // same tip as main
+  const mainBefore = sh(['rev-parse', 'main'], superRepo);
+
+  const code = await land.run({ flags: { self: true }, positional: [] }, { cwd: superRepo, json: true });
+  assertEqual(code, 0, 'nothing to land is not an error');
+  assertEqual(sh(['rev-parse', 'main'], superRepo), mainBefore, 'main should be untouched');
+});
+
+atest('land --self --changeset refuses an unmerged set, then lands and marks it', async tmp => {
+  const land = require('../src/commands/land');
+  const cs = require('../src/changeset');
+  const { superRepo, subA } = makeSuperTwo(tmp);
+
+  sh(['checkout', '-q', '-b', 'feat/a'], subA);
+  fs.writeFileSync(path.join(subA, 'a.txt'), 'a2\n');
+  sh(['add', '-A'], subA);
+  sh(['commit', '-q', '-m', 'a2'], subA);
+
+  const rec = cs.create(manifest.loadWorkspace(superRepo), { title: 'the change', memberNames: ['a'] });
+
+  sh(['add', 'libs/a'], superRepo);
+  sh(['checkout', '-q', '-b', 'feat/bump'], superRepo);
+  sh(['commit', '-q', '-m', 'bump libs/a'], superRepo);
+  const mainBefore = sh(['rev-parse', 'main'], superRepo);
+
+  // member not merged yet — refuse (skip Gate 1 so the change-set check is what bites)
+  let code = await land.run(
+    { flags: { self: true, changeset: rec.id, 'no-verify': true }, positional: [] },
+    { cwd: superRepo, json: true });
+  assertEqual(code, 1, 'should refuse while the change-set member is unmerged');
+  assertEqual(sh(['rev-parse', 'main'], superRepo), mainBefore, 'main must not have moved');
+
+  // merge the member; now it lands and the set is marked
+  sh(['push', '-q', 'origin', 'feat/a:main'], subA);
+  sh(['fetch', '-q', 'origin'], subA);
+
+  code = await land.run({ flags: { self: true, changeset: rec.id }, positional: [] }, { cwd: superRepo, json: true });
+  assertEqual(code, 0, 'should land once the member merged');
+  assertEqual(cs.read(superRepo, rec.id).status, 'landed', 'change set was not marked landed');
+});
+
+atest('status surfaces a superproject branch that is ready for land --self', async tmp => {
+  const status = require('../src/commands/status');
+  const { superRepo, subA } = makeSuperTwo(tmp);
+  landOnMain(subA, 'a.txt', 'a2\n', 'a2');
+  sh(['checkout', '-q', '-b', 'feat/bump'], superRepo);
+  sh(['add', 'libs/a'], superRepo);
+  sh(['commit', '-q', '-m', 'bump'], superRepo);
+
+  const lines = [];
+  const orig = console.log;
+  console.log = s => lines.push(String(s));
+  try {
+    status.run({ flags: {}, positional: [] }, { cwd: superRepo, json: true });
+  } finally {
+    console.log = orig;
+  }
+  const out = JSON.parse(lines.join('\n'));
+  assert(out.superproject.readyToLandSelf, 'status should report readyToLandSelf');
+  assertEqual(out.superproject.readyToLandSelf.ahead, 1, 'wrong ahead count');
+  assertEqual(out.superproject.readyToLandSelf.protectedBranch, 'main', 'wrong protected branch');
+});
+
 /* ------------------------------------------------------------------ */
 
 (async () => {
