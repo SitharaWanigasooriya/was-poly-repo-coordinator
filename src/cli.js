@@ -17,6 +17,7 @@ const COMMANDS = {
   init: require('./commands/init'),
   changeset: require('./commands/changeset'),
   pin: require('./commands/pin'),
+  pr: require('./commands/pr'),
   land: require('./commands/land'),
 };
 
@@ -32,7 +33,7 @@ const GROUPS = [
   },
   {
     title: 'Landing changes',
-    commands: ['changeset', 'pin', 'land'],
+    commands: ['changeset', 'pin', 'pr', 'land'],
   },
   {
     title: 'Workspace',
@@ -52,7 +53,7 @@ const VERBATIM_TAIL = new Set(['run']);
 
 // Flags that take a value: `--flag value` as well as `--flag=value`.
 // A flag given more than once accumulates into an array.
-const VALUE_FLAGS = new Set(['branch', 'label', 'C', 'changeset', 'message', 'title', 'member', 'remote']);
+const VALUE_FLAGS = new Set(['branch', 'label', 'C', 'changeset', 'message', 'title', 'member', 'remote', 'base', 'body']);
 
 function setFlag(flags, key, value) {
   if (key in flags && flags[key] !== true && flags[key] !== false) {

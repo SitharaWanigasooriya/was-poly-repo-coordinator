@@ -733,6 +733,163 @@ test('changeset records branch + pointer, refresh sees the merge', tmp => {
 
 /* ------------------------------------------------------------------ */
 
+console.log('\npr — open pull requests');
+
+atest('createPullRequest posts the right payload and maps the response', async () => {
+  const github = require('../src/github');
+  let seen = null;
+  const transport = (p, cx) => {
+    seen = { p, method: cx.method, body: cx.body };
+    return { ok: true, status: 201, body: { number: 42, html_url: 'https://github.com/o/r/pull/42' } };
+  };
+  const res = await github.createPullRequest(
+    { owner: 'o', repo: 'r', head: '1.x.x', base: 'main', title: 'T', body: 'B', draft: true },
+    { mode: 'token', token: 'x' }, transport
+  );
+  assertEqual(seen.p, '/repos/o/r/pulls', 'wrong path');
+  assertEqual(seen.method, 'POST', 'wrong method');
+  assertEqual(seen.body.head, '1.x.x');
+  assertEqual(seen.body.base, 'main');
+  assertEqual(seen.body.draft, true);
+  assertEqual(res.status, 'created');
+  assertEqual(res.number, 42);
+  assertEqual(res.url, 'https://github.com/o/r/pull/42');
+});
+
+atest('createPullRequest resolves an "already exists" 422 to the open PR', async () => {
+  const github = require('../src/github');
+  const transport = (p, cx) => {
+    if (cx.method === 'POST') {
+      return { ok: false, status: 422, body: { message: 'Validation Failed', errors: [{ message: 'A pull request already exists for o:x.' }] } };
+    }
+    return { ok: true, status: 200, body: [{ number: 7, html_url: 'https://github.com/o/r/pull/7' }] };
+  };
+  const res = await github.createPullRequest(
+    { owner: 'o', repo: 'r', head: 'x', base: 'main' }, { mode: 'token', token: 'x' }, transport
+  );
+  assertEqual(res.status, 'exists', 'a duplicate PR should resolve to the existing one');
+  assertEqual(res.number, 7);
+});
+
+atest('planPullRequests flags detached, on-protected, unpushed and non-github', async tmp => {
+  const pr = require('../src/pr');
+  const { superRepo, sub } = makeSuperWithMember(tmp);
+
+  // superproject sits on main (its protected branch) and has no github remote
+  let ws = manifest.loadWorkspace(superRepo);
+  let superT = pr.planPullRequests(ws, {}).targets.find(t => t.role === 'superproject');
+  assert(/on main/.test(superT.blocker || ''), `super blocker: ${superT.blocker}`);
+
+  // member on a feature branch, not yet pushed
+  sh(['checkout', '-q', '-b', 'feat/x'], sub);
+  fs.writeFileSync(path.join(sub, 'lib.js'), 'v2\n');
+  sh(['add', '-A'], sub);
+  sh(['commit', '-q', '-m', 'v2'], sub);
+  ws = manifest.loadWorkspace(superRepo);
+  let memT = pr.planPullRequests(ws, {}).targets.find(t => t.role === 'member');
+  assert(/not pushed/.test(memT.blocker || ''), `expected unpushed, got: ${memT.blocker}`);
+
+  // pushed, but origin is a local path — not github.com
+  sh(['push', '-q', '-u', 'origin', 'feat/x'], sub);
+  sh(['fetch', '-q', 'origin'], sub);
+  ws = manifest.loadWorkspace(superRepo);
+  memT = pr.planPullRequests(ws, {}).targets.find(t => t.role === 'member');
+  assert(/github\.com/.test(memT.blocker || ''), `expected non-github, got: ${memT.blocker}`);
+
+  // detached HEAD
+  sh(['checkout', '-q', '--detach', 'HEAD'], sub);
+  ws = manifest.loadWorkspace(superRepo);
+  memT = pr.planPullRequests(ws, {}).targets.find(t => t.role === 'member');
+  assert(/detached/.test(memT.blocker || ''), `expected detached, got: ${memT.blocker}`);
+});
+
+atest('openPullRequests creates one PR per member and skips the superproject with --members-only', async tmp => {
+  const pr = require('../src/pr');
+  const { superRepo, subA, subB } = makeSuperTwo(tmp);
+
+  for (const s of [subA, subB]) {
+    sh(['checkout', '-q', '-b', 'feat/change'], s);
+    fs.writeFileSync(path.join(s, path.basename(s) === 'a' ? 'a.txt' : 'b.txt'), 'work\n');
+    sh(['add', '-A'], s);
+    sh(['commit', '-q', '-m', 'work'], s);
+    sh(['push', '-q', '-u', 'origin', 'feat/change'], s);
+    sh(['fetch', '-q', 'origin'], s);
+  }
+
+  const ws = manifest.loadWorkspace(superRepo);
+  ws.members.forEach(mem => { mem.url = `https://github.com/o/${mem.name}.git`; });
+
+  const { targets } = pr.planPullRequests(ws, { membersOnly: true });
+  assertEqual(targets.length, 2, 'only the two members should be in scope');
+  assert(targets.every(t => !t.blocker), `unexpected blocker: ${targets.map(t => t.blocker).join('; ')}`);
+
+  const calls = [];
+  const transport = (p, cx) => {
+    calls.push({ p, method: cx.method });
+    if (cx.method === 'POST') return { ok: true, status: 201, body: { number: calls.length, html_url: `u${calls.length}` } };
+    return { ok: true, status: 200, body: [] }; // no existing PR
+  };
+  const results = await pr.openPullRequests(ws, targets, { auth: { mode: 'token', token: 'x' }, transport });
+
+  assertEqual(results.filter(r => r.status === 'created').length, 2, 'both member PRs should be created');
+  assert(results.every(r => r.base === 'main'), 'PRs should target main');
+  assert(calls.some(c => c.method === 'POST' && /\/o\/a\/pulls$/.test(c.p)), 'no POST for member a');
+});
+
+atest('openPullRequests reports an already-open PR instead of creating one', async tmp => {
+  const pr = require('../src/pr');
+  const { superRepo, subA } = makeSuperTwo(tmp);
+  sh(['checkout', '-q', '-b', 'feat/dup'], subA);
+  fs.writeFileSync(path.join(subA, 'a.txt'), 'x\n');
+  sh(['add', '-A'], subA);
+  sh(['commit', '-q', '-m', 'x'], subA);
+  sh(['push', '-q', '-u', 'origin', 'feat/dup'], subA);
+  sh(['fetch', '-q', 'origin'], subA);
+
+  const ws = manifest.loadWorkspace(superRepo);
+  ws.members.forEach(mem => { mem.url = `https://github.com/o/${mem.name}.git`; });
+  const { targets } = pr.planPullRequests(ws, { memberNames: ['a'], membersOnly: true });
+
+  let posted = false;
+  const transport = (p, cx) => {
+    if (cx.method === 'POST') { posted = true; return { ok: false, status: 500, body: null }; }
+    return { ok: true, status: 200, body: [{ number: 9, html_url: 'https://github.com/o/a/pull/9' }] };
+  };
+  const results = await pr.openPullRequests(ws, targets, { auth: { mode: 'token', token: 'x' }, transport });
+
+  assertEqual(results.length, 1);
+  assertEqual(results[0].status, 'exists');
+  assertEqual(results[0].number, 9);
+  assert(!posted, 'must not POST when a PR is already open');
+});
+
+atest('pr --changeset scopes the PRs to the change set members', async tmp => {
+  const cs = require('../src/changeset');
+  const pr = require('../src/pr');
+  const { superRepo, subA, subB } = makeSuperTwo(tmp);
+
+  for (const s of [subA, subB]) {
+    sh(['checkout', '-q', '-b', 'feat/x'], s);
+    fs.writeFileSync(path.join(s, path.basename(s) === 'a' ? 'a.txt' : 'b.txt'), 'w\n');
+    sh(['add', '-A'], s);
+    sh(['commit', '-q', '-m', 'w'], s);
+    sh(['push', '-q', '-u', 'origin', 'feat/x'], s);
+    sh(['fetch', '-q', 'origin'], s);
+  }
+
+  const rec = cs.create(manifest.loadWorkspace(superRepo), { title: 'just a', memberNames: ['a'] });
+
+  const ws = manifest.loadWorkspace(superRepo);
+  ws.members.forEach(mem => { mem.url = `https://github.com/o/${mem.name}.git`; });
+  const { targets, changeset } = pr.planPullRequests(ws, { changesetId: rec.id, membersOnly: true });
+
+  assertEqual(changeset.id, rec.id, 'changeset should be resolved');
+  assertEqual(targets.length, 1, 'only the change set member should be in scope');
+  assertEqual(targets[0].name, 'a');
+});
+
+/* ------------------------------------------------------------------ */
+
 console.log('\nland — ordered bump + Gate 1 + commit');
 
 function makeSuperTwo(tmp) {

@@ -19,6 +19,7 @@ plus the safety layer that everything later depends on.
 | [Problem Definition](docs/problem.docx) | Invariants I1–I8, the 33-item failure taxonomy, scope and non-goals |
 | [Solution Definition](docs/solution.docx) | ChangeSet primitive, the two gates, the saga, staging plan |
 | [ADR-0001 — Implementation Language](docs/adr-0001-implementation-language.docx) | Why Node.js, the costs accepted, and the triggers to revisit before Phase 5 |
+| [Command Handbook](docs/commands.md) | Every command, flag, exit code and alias, plus the recipes that string them together |
 
 ---
 
@@ -276,7 +277,13 @@ poly status       # where everything stands
 poly check        # Gate 1: is every submodule pointer safely merged?
 ```
 
+`poly help` lists every command; the [Command Handbook](docs/commands.md) has the
+full flag and exit-code reference.
+
 ## Commands
+
+The tables below are the short version. Every flag, exit code and alias is in the
+**[Command Handbook](docs/commands.md)** — or run `poly help <command>`.
 
 ### Every day
 
@@ -301,6 +308,7 @@ poly check        # Gate 1: is every submodule pointer safely merged?
 |---|---|
 | `poly changeset new "why" [member...]` | Open a change set: which members carry a change, on which branch, from which pointer. Local only. |
 | `poly changeset track [id]` | Recompute which members have merged into their protected branch. |
+| `poly pr [member...]` | Open a PR from the current branch into its protected branch, for the superproject and every member on a feature branch. Reports PRs already open; never pushes for you. Needs `gh` or `GH_TOKEN`. |
 | `poly pin [member...]` | Pin the commit each submodule points at (`refs/poly/pins/…`) so gc can never collect it. `--push` publishes. |
 | `poly land [--changeset id]` | Fast-forward submodules to what landed, in `dependsOn` order, run Gate 1, and commit the superproject only if it passes. Snapshots first. |
 | `poly land --self [--switch] [--push] [--changeset id]` | Fast-forward the superproject's own protected branch to the branch you are on, once Gate 1 is green. Refuses anything that is not a clean fast-forward. `poly status` flags when a branch is ready for this. |
@@ -423,10 +431,32 @@ intermediate commit still resolves.
 
 ```sh
 poly changeset new "checkout: tax rounding" pos-ms-pricing-tax-service pos-ms-order-service
+poly pr --changeset <id>        # open the member PRs (push each branch first)
 poly changeset track            # once the member PRs merge, this flips them to “merged”
 poly land --changeset <id> --dry-run
 poly land --changeset <id> --pin
 ```
+
+### Opening the PRs — `poly pr`
+
+`poly land` needs each member change already merged; `poly pr` opens the pull
+requests that get you there. For the superproject and every member repo on a
+feature branch, it opens a PR from the current branch into that repo's protected
+branch:
+
+```sh
+poly pr --changeset <id>            # scope to the change set; the PR body links back to it
+poly pr --members-only --draft      # every member on a feature branch, as drafts
+poly pr --base main                 # e.g. a superproject 1.x.x → main PR
+poly pr --dry-run                   # show the plan, open nothing
+```
+
+It **writes nothing to any local repo and will not push for you**: a branch that
+is not on its remote (or is ahead of it) is skipped with the exact
+`git push -u …` to run. A PR that is already open is reported, not duplicated.
+Members whose remote is not on github.com are skipped. It uses the `gh` CLI when
+it is installed and logged in, otherwise `GH_TOKEN` / `GITHUB_TOKEN` — the same
+auth as `poly check --online`.
 
 For each member in order, `land` fetches the protected branch, checks the move is
 a real fast-forward (the same predicates Gate 1 uses), fast-forwards the submodule

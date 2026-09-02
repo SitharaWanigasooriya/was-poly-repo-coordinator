@@ -66,45 +66,124 @@ function detectAuth() {
   };
 }
 
+function safeParse(text) {
+  try { return text && text.trim() ? JSON.parse(text) : null; } catch { return null; }
+}
+
+/** `gh api` reports the HTTP status in its stderr line: "... (HTTP 422)". */
+function ghErrorStatus(stderr) {
+  const m = String(stderr || '').match(/HTTP (\d{3})/);
+  return m ? Number(m[1]) : 0;
+}
+
 /**
- * One GET against the GitHub API. Returns { ok, status, body } and never throws.
- * `transport` is for tests: (path, auth) => { ok, status, body }.
+ * One request against the GitHub API. Returns { ok, status, body } and never
+ * throws. `transport` is for tests: (path, { method, body, auth }) => { ok, status, body }.
  */
-async function apiGet(path, auth, transport) {
-  if (transport) return transport(path, auth);
+async function api(path, { method = 'GET', auth, body, transport } = {}) {
+  if (transport) return transport(path, { method, body, auth });
 
   if (auth.mode === 'gh') {
-    const r = spawnSync('gh', ['api', path], { encoding: 'utf8', windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
+    const args = ['api', '--method', method, path];
+    const opts = { encoding: 'utf8', windowsHide: true, maxBuffer: 16 * 1024 * 1024 };
+    if (body !== undefined) {
+      args.push('--input', '-');
+      opts.input = JSON.stringify(body);
+    }
+    const r = spawnSync('gh', args, opts);
     if (r.status !== 0) {
-      return { ok: false, status: 0, body: null, error: (r.stderr || 'gh api failed').trim().split('\n')[0] };
+      return {
+        ok: false,
+        status: ghErrorStatus(r.stderr),
+        body: safeParse(r.stdout),
+        error: (r.stderr || 'gh api failed').trim().split('\n')[0],
+      };
     }
-    try {
-      return { ok: true, status: 200, body: JSON.parse(r.stdout) };
-    } catch (err) {
-      return { ok: false, status: 0, body: null, error: `could not parse gh output: ${err.message}` };
+    const parsed = safeParse(r.stdout);
+    if (parsed === null && r.stdout.trim()) {
+      return { ok: false, status: 0, body: null, error: 'could not parse gh output' };
     }
+    return { ok: true, status: 200, body: parsed };
   }
 
   if (auth.mode === 'token') {
     try {
       const res = await fetch(API_ROOT + path, {
+        method,
         headers: {
           Authorization: `Bearer ${auth.token}`,
           Accept: 'application/vnd.github+json',
           'User-Agent': 'poly',
           'X-GitHub-Api-Version': '2022-11-28',
+          ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
         },
+        body: body !== undefined ? JSON.stringify(body) : undefined,
       });
       const text = await res.text();
-      let body = null;
-      try { body = text ? JSON.parse(text) : null; } catch { /* leave null */ }
-      return { ok: res.ok, status: res.status, body, error: res.ok ? null : `HTTP ${res.status}` };
+      return { ok: res.ok, status: res.status, body: safeParse(text), error: res.ok ? null : `HTTP ${res.status}` };
     } catch (err) {
       return { ok: false, status: 0, body: null, error: err.message };
     }
   }
 
   return { ok: false, status: 0, body: null, error: 'no auth' };
+}
+
+/**
+ * One GET against the GitHub API. Returns { ok, status, body } and never throws.
+ * `transport` is for tests: (path, auth) => { ok, status, body }.
+ */
+async function apiGet(path, auth, transport) {
+  if (transport) return transport(path, auth);
+  return api(path, { method: 'GET', auth });
+}
+
+/** A human-readable reason from a failed create/find response. */
+function prErrorMessage(r) {
+  const b = r.body;
+  if (b && typeof b === 'object') {
+    const parts = [b.message].filter(Boolean);
+    if (Array.isArray(b.errors)) parts.push(...b.errors.map(e => e.message || e.code).filter(Boolean));
+    if (parts.length) return parts.join('; ');
+  }
+  return r.error || '';
+}
+
+/**
+ * The open pull request for `head` -> `base`, or null.
+ * `head` is a branch name; GitHub wants it qualified as `owner:branch`.
+ */
+async function findOpenPr({ owner, repo, head, base }, auth, transport) {
+  const params = new URLSearchParams({ state: 'open', head: `${owner}:${head}` });
+  if (base) params.set('base', base);
+  const r = await api(`/repos/${owner}/${repo}/pulls?${params}`, { method: 'GET', auth, transport });
+  if (!r.ok || !Array.isArray(r.body) || !r.body.length) return null;
+  const pr = r.body[0];
+  return { number: pr.number, url: pr.html_url };
+}
+
+/**
+ * Open a pull request. Returns:
+ *   { ok: true, status: 'created' | 'exists', number, url }
+ *   { ok: false, error }
+ * An "already exists" 422 is resolved to the existing PR rather than an error.
+ */
+async function createPullRequest({ owner, repo, head, base, title, body, draft }, auth, transport) {
+  const payload = { title: title || head, head, base };
+  if (body) payload.body = body;
+  if (draft) payload.draft = true;
+
+  const r = await api(`/repos/${owner}/${repo}/pulls`, { method: 'POST', auth, body: payload, transport });
+  if (r.ok && r.body && r.body.number) {
+    return { ok: true, status: 'created', number: r.body.number, url: r.body.html_url };
+  }
+
+  const msg = prErrorMessage(r);
+  if (/already exist/i.test(msg)) {
+    const existing = await findOpenPr({ owner, repo, head, base }, auth, transport);
+    if (existing) return { ok: true, status: 'exists', number: existing.number, url: existing.url };
+  }
+  return { ok: false, error: msg || 'could not create pull request' };
 }
 
 /**
@@ -160,8 +239,11 @@ module.exports = {
   API_ROOT,
   parseGithubRepo,
   detectAuth,
+  api,
   apiGet,
   commitReviewState,
+  findOpenPr,
+  createPullRequest,
   // exported for tests
-  _internal: { ghAvailable, ghToken },
+  _internal: { ghAvailable, ghToken, prErrorMessage },
 };
