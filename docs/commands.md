@@ -72,7 +72,7 @@ continue if that snapshot fails.
 | Flag | Effect |
 |---|---|
 | `-C <dir>` | Run as if from `<dir>` instead of the current directory. |
-| `--json` | Machine-readable output. Supported by `status`, `check`, `doctor`, `snapshots`, `pin`. |
+| `--json` | Machine-readable output. Supported by every command except `run`. |
 | `--help`, `-h` | Detail for the command in front of it (`poly land --help`). |
 | `--version`, `-V` | Print the version and exit. |
 
@@ -93,6 +93,37 @@ continue if that snapshot fails.
 - For `poly run`, everything after the wrapped program's name is passed through
   untouched — so poly's own flags go **before** it:
   `poly run --members-only git checkout -b 1.x.x`.
+
+### Reading the tables
+
+Most commands print an aligned table. A few conventions hold across all of them,
+so they are stated once here rather than repeated under every command.
+
+| Symbol | `POLY_ASCII=1` | Meaning |
+|---|---|---|
+| `✓` | `OK` | Good — the check passed, or the write succeeded. |
+| `✗` | `X` | Error. Blocking: something needs fixing before the state is safe. |
+| `!` | `!` | Warning. Worth knowing, not blocking. |
+| `·` | `-` | Neutral note — nothing needed doing. |
+| `→` | `->` | A direction: `from → to`, or `head → base`. |
+| `—` | `—` | Not applicable, or nothing recorded. |
+| `?` | `?` | Could not be determined. The reason follows. |
+
+**Commit SHAs are shortened to 10 characters** in every table. The full SHA is
+always present in `--json`.
+
+**Some columns are deliberately unlabelled.** `poly pr`, `poly land` and
+`poly init` end in a verdict column with an empty header, so their header row
+renders shorter than the rows beneath it. That is intentional, not a truncated
+table — the values read as sentences and a header would add nothing:
+
+```
+  MEMBER           POINTER
+  shared-ui        4c5d6e7f80 → b7a9c1d2e3  ✓ ready
+```
+
+Every example below is real rendered output. Colour is stripped here; in a
+terminal the verdicts are green, red, yellow and grey.
 
 ---
 
@@ -118,7 +149,7 @@ Per command, `1` means:
 | `sync` | Any repo reported a problem. |
 | `run` | Any repo's command failed. |
 | `pin` | A pin failed to write or push. |
-| `pr` | A PR failed to open, or a branch needs pushing first (outside `--dry-run`). |
+| `pr` | GitHub refused a PR, or there is no GitHub auth (outside `--dry-run`). A *skipped* repo — unpushed branch, still on the protected branch, non-github remote — does **not** fail the command. |
 | `land` | Gate 1 blocked the commit, a move was not a fast-forward, or a push failed. |
 | `init` | The manifest already exists and neither `--refresh` nor `--force` was given. |
 
@@ -147,6 +178,31 @@ findings, titles only. For detail and fixes, use `poly doctor`.
 Also prints the safety-net line: when the last snapshot was taken, how many repos
 are dirty, how many pointers are pinned, and the next move worth making
 (`poly save`, `poly pin`, `poly doctor`, `poly land --self`).
+
+```
+  platform  ~/work/platform
+  branch  main   clean
+
+  3 members
+  MEMBER           BRANCH                  WORKTREE               POINTER
+  auth-service     feat/token-rotation →2  2 modified             ✓ merged
+  billing-service  main                    clean                  ✗ not merged
+  shared-ui        (detached)              1 staged, 3 untracked  ✓ merged
+
+  1 problem
+  ✗ billing-service: pointer is not merged into origin/main
+
+  ✓ safety net: last snapshot 4m ago (20260903-091455-a1b2)
+    2 repo(s) have uncommitted work — poly save makes it restorable
+    run poly doctor for detail and suggested fixes
+```
+
+| Column | What it shows |
+|---|---|
+| `MEMBER` | The member's name from `poly.json`, or the last segment of its path when the manifest does not name it. |
+| `BRANCH` | The checked-out branch and its position against its upstream: `→2` is 2 commits **ahead**, `2→` is 2 **behind**, and both appear together when it has diverged. Also `(detached)` when HEAD is on no branch, `(no upstream)` when the branch tracks nothing, `(no commits)` for an empty repo, and `not checked out` for an uninitialised submodule. |
+| `WORKTREE` | Uncommitted work, counted by kind — `clean`, or a comma-separated list of `N staged`, `N modified`, `N untracked`, `N conflicted`. Untracked files are counted separately because they are the ones most easily lost. |
+| `POINTER` | Gate 1's verdict on the submodule SHA this superproject records: `✓ merged`, `✗ not merged`, `✗ commit missing` (the SHA does not exist in the member repo at all), `✗ moves backwards` (a regression), `! no gitlink` (no pointer recorded), or `? <reason>` when it could not be checked. |
 
 > **status vs check.** `status` is the human dashboard and covers every check;
 > `check` is the CI gate and covers pointer integrity only, in full detail. Their
@@ -178,6 +234,32 @@ regression**, and — when `policy.requirePins` is on — has a **durable pin**.
 | `--strict` | Exit `1` on problems. Without it the gate reports and exits `0`. |
 | `--online` | Also run I3 (review integrity) against GitHub. |
 | `--json` | Machine-readable output for CI. |
+
+```
+  Gate 1 — pointer integrity  (staged state)
+  ~/work/platform
+
+  MEMBER           POINTER     AGAINST      VERDICT
+  auth-service     a1b2c3d4e5  origin/main  ✓ reachable
+  billing-service  9f8e7d6c5b  origin/main  ✗ not merged
+  shared-ui        4c5d6e7f80  origin/main  ✓ reachable
+
+  ✗ billing-service: pointer is not merged into main [I1]
+      libs/billing-service points at 9f8e7d6c5b, which is not an ancestor of
+      origin/main. Merging this would put a pointer on main that nobody can
+      resolve from the member's protected history.
+      fix: Merge the member branch into main, then re-bump the pointer.
+
+  ✗ 1 problem would put a broken pointer on a protected branch
+  reporting mode — pass --strict (or POLY_STRICT=1) to fail the build on this
+```
+
+| Column | What it shows |
+|---|---|
+| `MEMBER` | The member's name from `poly.json`. |
+| `POINTER` | The submodule SHA recorded in the state being judged — the staged index by default, the last commit with `--head`. `—` when no gitlink is recorded for that member. |
+| `AGAINST` | The ref the pointer was judged against, with `refs/remotes/` and `refs/heads/` stripped. `origin/main` means it was judged against the remote-tracking branch (preferred — it reflects what actually landed upstream); a bare `main` means only a local branch was available, so the verdict is only as fresh as your last fetch. |
+| `VERDICT` | `✓ reachable` (the commit is an ancestor of that ref — merged, not merely pushed), `✗ not merged`, `✗ commit missing` (the SHA does not exist in the member repo), `✗ moves backwards` (the pointer regressed), `! no gitlink`, or `? <reason>` when it could not be verified. |
 
 Every finding is printed in full — invariant tag, detail, and a `fix:` line.
 
@@ -258,6 +340,28 @@ nothing is stashed or removed, unlike `git stash`.
 poly save "before the big refactor"
 ```
 
+```
+  ✓ snapshot 20260903-091455-a1b2  “before the big refactor”
+
+  REPO          BRANCH               CAPTURED
+  platform      main                 2 changes
+  auth-service  feat/token-rotation  5 changes — includes 3 untracked
+  shared-ui     (detached)           1 change
+
+  4 repo(s) captured, 3 had uncommitted work
+  bring it back with poly restore 20260903-091455-a1b2
+```
+
+| Column | What it shows |
+|---|---|
+| `REPO` | The superproject first, then each member. |
+| `BRANCH` | The branch at capture time, so you can tell what the snapshot was taken *from*. `(detached)` when HEAD was on no branch, `(none)` for a repo with no commits yet. |
+| `CAPTURED` | How much uncommitted work went into the snapshot, and how much of that was untracked — the part `git stash` would leave behind by default. |
+
+**Only repos that had uncommitted work appear in the table.** Clean repos are
+still snapshotted; they are counted in the summary line rather than listed, so
+the table stays a list of what you would actually lose.
+
 ---
 
 ### `poly snapshots`
@@ -272,6 +376,22 @@ Reads `refs/poly/safety/*` from every repo, so snapshots stay discoverable even 
 `.poly/` is deleted. Shows the 20 most recent; `--all` shows every one.
 
 Nothing in poly ever deletes a snapshot.
+
+```
+  ID                       WHEN  REPOS  LABEL
+  20260903-091455-a1b2   4m ago      4  before the big refactor
+  20260903-084102-7f3c  42m ago      4  before: git checkout -b 1.x.x
+  20260902-231500-bf87  10h ago      3  —
+
+  inspect: poly restore <id> creates a branch at the snapshot, changing nothing else
+```
+
+| Column | What it shows |
+|---|---|
+| `ID` | The snapshot id, `YYYYMMDD-HHMMSS-xxxx` — sortable, and unique via the random suffix. Any unambiguous **prefix** is enough for `poly restore`. |
+| `WHEN` | How long ago it was taken, right-aligned. Newest first. |
+| `REPOS` | How many repositories the snapshot covers. A number lower than your repo count means a member was not checked out at the time. |
+| `LABEL` | The label you passed to `poly save`, or the one poly recorded automatically before a mutating command (`before: git checkout -b 1.x.x`). `—` when there is none. |
 
 ---
 
@@ -300,6 +420,26 @@ git -C libs/api diff poly/snap/20260829-221452-50f7
 poly restore 20260829-221452-50f7 --apply --yes    # write the files back
 ```
 
+```
+  snapshot available  20260903-091455-a1b2  “before the big refactor”  4m ago
+
+  REPO          RESULT
+  platform      ✓ branch poly/snap/20260903-091455-a1b2
+  auth-service  ✓ branch poly/snap/20260903-091455-a1b2
+  shared-ui     ✗ snapshot commit missing from this repo
+
+  your working tree is unchanged. To look at what was saved:
+    git -C ~/work/platform diff poly/snap/20260903-091455-a1b2
+```
+
+| Column | What it shows |
+|---|---|
+| `REPO` | Each repository the snapshot covered. |
+| `RESULT` | What was done in that repo. `✓ branch <name>` in the default mode — the snapshot is now a branch you can diff or cherry-pick from, and nothing else changed. `✓ files restored into working tree` with `--apply`. `✗ <reason>` when a repo could not be restored; the commonest is a member that was not part of that snapshot. |
+
+A failure in one repo does not roll back the others — each row is independent, and
+with `--apply` the pre-restore snapshot named in the header undoes the whole thing.
+
 ---
 
 ## Landing a change
@@ -325,6 +465,43 @@ safe to bump.
 | `list` | Every change set, newest first. |
 | `show [<id>]` | Per-member state (default: the newest). |
 | `track [<id>]` | Recompute merge state from the repos — flips members to *merged* once their PRs land. |
+
+**`poly changeset list`**
+
+```
+  ID                     WHEN  STATUS  MEMBERS  TITLE
+  20260903-0914-bf87   4m ago  open          2  Rotate service tokens
+  20260902-1730-3ac1  18h ago  ready         3  Unify error envelope
+  20260828-1102-9d44   6d ago  landed        1  Bump shared-ui to 2.0
+```
+
+| Column | What it shows |
+|---|---|
+| `ID` | The change set id. A prefix is enough wherever an id is accepted. |
+| `WHEN` | How long ago the set was opened, right-aligned. Newest first. |
+| `STATUS` | `open` — at least one member has not merged yet. `ready` — every member is merged, so `poly land` can bump it. `landed` — the pointers have been bumped. |
+| `MEMBERS` | How many member repos carry this change. |
+| `TITLE` | The title you gave it. |
+
+**`poly changeset show`**
+
+```
+  20260903-0914-bf87  “Rotate service tokens”  open  4m ago
+
+  MEMBER           BRANCH               OPENED AT   MERGED
+  auth-service     feat/token-rotation  a1b2c3d4e5  ✓ yes
+  billing-service  feat/token-rotation  9f8e7d6c5b  ! not yet
+
+  waiting on: billing-service
+  refresh with poly changeset track 20260903-0914-bf87
+```
+
+| Column | What it shows |
+|---|---|
+| `MEMBER` | A member repo carrying part of this change. |
+| `BRANCH` | The branch that member was on when the set was opened. `—` when it was not on one. |
+| `OPENED AT` | The pointer SHA at the moment the set was opened — the baseline the eventual bump moves *from*. It is a record, not a target. |
+| `MERGED` | `✓ yes` once that member's work is on its protected branch, `! not yet` otherwise. This is **not** live: it is recomputed only when you run `poly changeset track`. |
 
 ---
 
@@ -355,6 +532,27 @@ on github.com are skipped.
 | `--draft` | Open as draft PRs. |
 | `--members-only` | Skip the superproject. |
 | `--dry-run` | Show the plan, open nothing. |
+
+```
+  REPO
+  platform         feat/token-rotation → main  ✓ created #42  https://github.com/acme/platform/pull/42
+  auth-service     feat/token-rotation → main  · exists #17  https://github.com/acme/auth-service/pull/17
+  billing-service  feat/token-rotation → main  ! feat/token-rotation is not pushed — run: git -C libs/billing-service push -u origin feat/token-rotation
+
+  1 PR opened, 1 already open, 1 repo skipped
+```
+
+This table has three columns but only the first is labelled — see
+[Reading the tables](#reading-the-tables).
+
+| Column | What it shows |
+|---|---|
+| `REPO` | The superproject and each member in scope. |
+| *(2nd, unlabelled)* | The PR direction, `<head branch> → <base>`. The head is whatever that repo currently has checked out; the base is its protected branch unless `--base` overrides it. |
+| *(3rd, unlabelled)* | The outcome. `✓ created #N <url>` — a new PR. `· exists #N <url>` — an open PR already covered it, so nothing was created. `! <reason>` — skipped, with the fix inline (unpushed branch, still on the protected branch, detached HEAD, non-github remote, not checked out). `✗ <error>` — GitHub refused it. Under `--dry-run` every openable row instead reads `· would open a PR into <base>`. |
+
+Only `✗` rows count as failures for the exit code; a `!` skip does not, because
+the branch simply is not ready yet.
 
 Auth is the same as `poly check --online`: the `gh` CLI when installed and logged
 in, otherwise `GH_TOKEN` / `GITHUB_TOKEN`.
@@ -404,6 +602,26 @@ in each member repo, which keeps that exact commit reachable forever.
 | `--push` | Also push the pin refs to each member remote. |
 | `--head` | Pin what the last commit records, not the staged state. |
 
+```
+  safety snapshot 20260903-091455-a1b2
+
+  MEMBER           COMMIT      RESULT
+  auth-service     a1b2c3d4e5  ✓ pinned · pushed
+  billing-service  9f8e7d6c5b  · already pinned
+  shared-ui        4c5d6e7f80  ✓ pinned · not pushed
+
+  2 pins written, 1 already pinned
+```
+
+| Column | What it shows |
+|---|---|
+| `MEMBER` | Each member whose pointer is being pinned. |
+| `COMMIT` | The commit the pin will keep reachable — the SHA the superproject records for that member, staged by default or from the last commit with `--head`. |
+| `RESULT` | `✓ pinned` — a new `refs/poly/pins/…` ref was written. `· already pinned` — the ref existed, so nothing was done. `✗ <error>` — the pin could not be written. With `--push`, ` · pushed` or ` · not pushed` is appended, so a pin that exists locally but never reached the remote is visible rather than assumed. |
+
+`· not pushed` matters: a pin that lives only on your machine does not protect the
+commit for anyone else. It appears when `--push` was asked for and the push failed.
+
 Set `"requirePins": true` in `poly.json` to make `poly check` fail on any pointer
 without a pin. Nothing in poly ever deletes a pin.
 
@@ -438,6 +656,32 @@ snapshot exists to make survivable, so it stops on the first blocker. It never r
 | `--pin-push` | Pin each landed commit and publish the pin refs. |
 | `--message <m>` | Override the generated commit message. |
 | `--force` | Proceed even if the superproject has unrelated changes. |
+
+```
+  safety snapshot 20260903-091455-a1b2
+
+  MEMBER           POINTER
+  shared-ui        4c5d6e7f80 → b7a9c1d2e3  ✓ ready
+  auth-service     a1b2c3d4e5 → a1b2c3d4e5  · already at the protected branch
+  billing-service  9f8e7d6c5b → ?           ✗ not merged into origin/main
+
+  ✗ 1 member not ready — nothing was committed
+  your work before this is in snapshot 20260903-091455-a1b2
+```
+
+This table's third column is unlabelled — see
+[Reading the tables](#reading-the-tables).
+
+| Column | What it shows |
+|---|---|
+| `MEMBER` | Members in **`dependsOn` order**, not alphabetical — this is the order the bumps would be applied in. |
+| `POINTER` | The move: `<current> → <target>`. `—` on the left when the superproject records no pointer yet; `?` on the right when no target could be resolved, which always pairs with a blocker. |
+| *(3rd, unlabelled)* | `✓ ready` — a real forward move that will be staged. `· <note>` — nothing to do, usually because the pointer already matches the protected branch. `✗ <blocker>` — this member cannot be landed, with the reason. |
+
+**One `✗` stops everything.** There is no `--keep-going`: if any member is blocked,
+nothing is committed at all, and the rows above the blocker are left staged next to
+the pre-land snapshot. A half-landed change set is the exact state the snapshot
+exists to make survivable, so `poly land` never creates one silently.
 
 The change set is optional — plain `poly land` bumps every pointer that has a
 forward move available.
@@ -552,6 +796,40 @@ that one file.
 | `--force` | Overwrite the existing manifest completely. |
 
 Without either flag it refuses to overwrite an existing manifest.
+
+```
+3 member(s)
+  MEMBER           PATH                  PROTECTED
+  auth-service     libs/auth-service     main       checked out
+  billing-service  libs/billing-service  main       checked out
+  shared-ui        libs/shared-ui        main       not checked out
+
+· Review poly.json — especially "protectedBranch" and "dependsOn" — then:
+  poly status   see where everything stands
+  poly check    run Gate 1 (pointer integrity)
+```
+
+This table's fourth column is unlabelled — see
+[Reading the tables](#reading-the-tables).
+
+| Column | What it shows |
+|---|---|
+| `MEMBER` | The name written into `poly.json`, derived from the `.gitmodules` entry. |
+| `PATH` | Where the submodule sits inside the superproject, always with forward slashes. |
+| `PROTECTED` | The branch recorded as `protectedBranch` for that member — **the single most important value to review here.** Every Gate 1 verdict is measured against it, so a wrong value makes `poly check` confidently answer the wrong question. |
+| *(4th, unlabelled)* | `checked out` or `not checked out`. A member that is not checked out is still written to the manifest; it is simply skipped by commands that need to read its history. |
+
+`PROTECTED` is inferred in three steps, and only the first is authoritative:
+
+1. the `branch =` field in `.gitmodules`, when the submodule sets one;
+2. otherwise **the branch that member currently has checked out** — so running
+   `poly init` while a member sits on a feature branch records *that* as its
+   protected branch;
+3. otherwise `defaults.protectedBranch` from `poly.json` (`main`).
+
+Step 2 is the one to check. `init` also writes `dependsOn: []` for every member —
+nothing in `.gitmodules` records dependencies, so if members must land in a
+particular order, fill it in by hand. `poly land` orders its bumps by it.
 
 ---
 
