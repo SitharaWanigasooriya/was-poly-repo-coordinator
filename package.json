@@ -1,6 +1,6 @@
 {
   "name": "@wanigasooriya-solutions/poly",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Safe coordination of change sets across a Git superproject and its submodules. Your local work is never destroyed.",
   "bin": {
     "poly": "bin/poly.js"
